@@ -18,7 +18,6 @@ func Save(bc *blockchain.Blockchain, path string) error {
 }
 
 // Load reads blockchain data from disk at the specified path.
-// If the file does not exist, it initializes and returns a new blockchain.
 func Load(path string) (*blockchain.Blockchain, error) {
 	if _, err := os.Stat(path); os.IsNotExist(err) {
 		return blockchain.NewBlockchain(), nil

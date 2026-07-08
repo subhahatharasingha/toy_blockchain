@@ -34,7 +34,6 @@ func NewBlockchain() *Blockchain {
 }
 
 // createGenesisBlock creates the first block in the blockchain.
-// Its fields are fixed and deterministic, with previous hash set to "0".
 func createGenesisBlock() block.Block {
 	genesis := block.Block{
 		Index:        0,
@@ -50,8 +49,6 @@ func createGenesisBlock() block.Block {
 }
 
 // VerifyTransaction checks if a transaction is valid.
-// It rejects non-positive amounts, invalid sender/receiver names, self-transfers,
-// and overspending (except for transactions from "system" or "faucet").
 func (bc *Blockchain) VerifyTransaction(tx transaction.Transaction) error {
 	if tx.Amount <= 0 {
 		return errors.New("transaction amount must be greater than zero")
@@ -66,8 +63,7 @@ func (bc *Blockchain) VerifyTransaction(tx transaction.Transaction) error {
 		return errors.New("sender and receiver cannot be the same account")
 	}
 
-	// "system" and "faucet" are special accounts with infinite/unchecked balances
-	// to allow introducing initial supply of coins into the system.
+	
 	if tx.Sender == "system" || tx.Sender == "faucet" {
 		return nil
 	}
@@ -168,10 +164,6 @@ func (bc *Blockchain) PrintChain() {
 }
 
 // Validate checks the integrity of the blockchain.
-// It returns:
-// - valid (bool)
-// - invalidBlockIndex (int): the index of the first invalid block, or -1 if valid.
-// - err (error): detail of the validation failure.
 func (bc *Blockchain) Validate(difficulty int) (bool, int, error) {
 	if len(bc.Blocks) == 0 {
 		return false, -1, errors.New("blockchain is empty")

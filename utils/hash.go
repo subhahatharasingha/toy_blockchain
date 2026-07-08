@@ -10,8 +10,6 @@ import (
 )
 
 // blockHashInput defines the exact subset of Block fields that feed the hash.
-// This guarantees that the hash calculation is 100% deterministic and
-// explicitly excludes the block's own Hash field.
 type blockHashInput struct {
 	Index        int                       `json:"index"`
 	Timestamp    int64                     `json:"timestamp"`

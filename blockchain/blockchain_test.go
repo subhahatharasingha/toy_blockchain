@@ -153,7 +153,6 @@ func TestTransactionRejection(t *testing.T) {
 	mining.MineBlock(&block1, difficulty)
 	bc.AddMinedBlock(block1)
 
-	// Now alice has 50 coins.
 	// 1. Try to send negative amount
 	err = bc.AddTransaction(transaction.Transaction{
 		Sender:   "alice",
