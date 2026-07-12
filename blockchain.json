@@ -6,7 +6,8 @@
       "transactions": [],
       "previousHash": "0",
       "nonce": 0,
-      "hash": "c4c138fea607e7578d65124c20f3ea150dd084cecf753a8aad7a8f537f78bb08"
+      "difficulty": 0,
+      "hash": "c776eca7c570e7500c5d6ed8bbabb4aecc69e25a2cdd7918cab39638a570c68e"
     },
     {
       "index": 1,
@@ -18,9 +19,10 @@
           "amount": 100
         }
       ],
-      "previousHash": "c4c138fea607e7578d65124c20f3ea150dd084cecf753a8aad7a8f537f78bb08",
-      "nonce": 104367,
-      "hash": "000077072175d6ec6c3a6dbeac5fadaf76259d9e6d0ac9e621a00b4df5c5413b"
+      "previousHash": "c776eca7c570e7500c5d6ed8bbabb4aecc69e25a2cdd7918cab39638a570c68e",
+      "nonce": 53827,
+      "difficulty": 4,
+      "hash": "0000631b4c1398bbd10f1c22be9baef96e785fbe022336c36b5463be81876047"
     },
     {
       "index": 2,
@@ -32,9 +34,10 @@
           "amount": 40
         }
       ],
-      "previousHash": "000077072175d6ec6c3a6dbeac5fadaf76259d9e6d0ac9e621a00b4df5c5413b",
-      "nonce": 70885,
-      "hash": "0000fecd128040f6a80a910010777940e91a706e304f1d1149f8361f16ba7cbd"
+      "previousHash": "0000631b4c1398bbd10f1c22be9baef96e785fbe022336c36b5463be81876047",
+      "nonce": 73502,
+      "difficulty": 4,
+      "hash": "000021876322dfdb6b378e090132c69beb4a421780f60a34831ae594041ef9ed"
     },
     {
       "index": 3,
@@ -46,9 +49,45 @@
           "amount": 100
         }
       ],
-      "previousHash": "0000fecd128040f6a80a910010777940e91a706e304f1d1149f8361f16ba7cbd",
-      "nonce": 153188,
-      "hash": "00008809028800e6bbf4f2fb1072371c49703e28a7dfd048e29a7a7a4e474fae"
+      "previousHash": "000021876322dfdb6b378e090132c69beb4a421780f60a34831ae594041ef9ed",
+      "nonce": 81644,
+      "difficulty": 4,
+      "hash": "000086607a5413ce40b87faaff803266890a15ef3940b0f06937a70a459e270c"
+    },
+    {
+      "index": 4,
+      "timestamp": 1783833456,
+      "transactions": [
+        {
+          "sender": "faucet",
+          "receiver": "subha",
+          "amount": 100
+        },
+        {
+          "sender": "subha",
+          "receiver": "dhanu",
+          "amount": 100
+        },
+        {
+          "sender": "faucet",
+          "receiver": "subha",
+          "amount": 100
+        },
+        {
+          "sender": "faucet",
+          "receiver": "subha",
+          "amount": 100
+        },
+        {
+          "sender": "alice",
+          "receiver": "bob",
+          "amount": 10
+        }
+      ],
+      "previousHash": "000086607a5413ce40b87faaff803266890a15ef3940b0f06937a70a459e270c",
+      "nonce": 815,
+      "difficulty": 3,
+      "hash": "000d60a503bbe1d991e55562dc56b59af2876eb92bd7a99732c3930bad11ed24"
     }
   ],
   "pending_transactions": []

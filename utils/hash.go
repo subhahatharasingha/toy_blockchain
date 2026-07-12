@@ -16,6 +16,7 @@ type blockHashInput struct {
 	Transactions []transaction.Transaction `json:"transactions"`
 	PreviousHash string                    `json:"previousHash"`
 	Nonce        int                       `json:"nonce"`
+	Difficulty   int                       `json:"difficulty"`
 }
 
 // CalculateHash generates a SHA256 hash for a block by serializing
@@ -27,6 +28,7 @@ func CalculateHash(b block.Block) string {
 		Transactions: b.Transactions,
 		PreviousHash: b.PreviousHash,
 		Nonce:        b.Nonce,
+		Difficulty:   b.Difficulty,
 	}
 
 	// Convert the block input into JSON (struct fields are marshaled deterministically in order)

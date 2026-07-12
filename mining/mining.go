@@ -10,6 +10,7 @@ import (
 
 func MineBlock(b *block.Block, difficulty int) (int, time.Duration) {
 	start := time.Now()
+	b.Difficulty = difficulty
 	target := strings.Repeat("0", difficulty)
 
 	for {

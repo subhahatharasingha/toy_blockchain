@@ -124,8 +124,9 @@ func mineBlock(bc *blockchain.Blockchain) {
 		return
 	}
 
-	// Set mining timestamp
+	// Set mining timestamp and difficulty
 	blockData.Timestamp = time.Now().Unix()
+	blockData.Difficulty = *difficultyFlag
 
 	fmt.Printf("Mining block %d with %d transactions (difficulty target: %d)...\n",
 		blockData.Index, len(blockData.Transactions), *difficultyFlag)

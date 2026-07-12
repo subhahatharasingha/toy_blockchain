@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"math"
 
 	"toy-blockchain/block"
 	"toy-blockchain/ledger"
@@ -41,6 +42,7 @@ func createGenesisBlock() block.Block {
 		Transactions: []transaction.Transaction{},
 		PreviousHash: "0",
 		Nonce:        0,
+		Difficulty:   0,
 	}
 
 	genesis.Hash = utils.CalculateHash(genesis)
@@ -50,9 +52,9 @@ func createGenesisBlock() block.Block {
 
 // VerifyTransaction checks if a transaction is valid.
 func (bc *Blockchain) VerifyTransaction(tx transaction.Transaction) error {
-	if tx.Amount <= 0 {
-		return errors.New("transaction amount must be greater than zero")
-	}
+	if tx.Amount <= 0 || math.IsNaN(tx.Amount) || math.IsInf(tx.Amount, 0) {
+    return errors.New("invalid transaction amount")
+}
 	if tx.Sender == "" {
 		return errors.New("sender name cannot be empty")
 	}
@@ -152,6 +154,7 @@ func (bc *Blockchain) PrintChain() {
 		fmt.Println("-----------------------------------")
 		fmt.Printf("Index:        %d\n", b.Index)
 		fmt.Printf("Timestamp:    %d (%s)\n", b.Timestamp, fmt.Sprint(b.Timestamp))
+		fmt.Printf("Difficulty:   %d\n", b.Difficulty)
 		fmt.Printf("PreviousHash: %s\n", b.PreviousHash)
 		fmt.Printf("Hash:         %s\n", b.Hash)
 		fmt.Printf("Nonce:        %d\n", b.Nonce)
@@ -182,8 +185,6 @@ func (bc *Blockchain) Validate(difficulty int) (bool, int, error) {
 		return false, 0, fmt.Errorf("genesis block hash is invalid: stored '%s', recalculated '%s'", genesis.Hash, expectedGenesisHash)
 	}
 
-	target := strings.Repeat("0", difficulty)
-
 	// Verify Subsequent Blocks
 	for i := 1; i < len(bc.Blocks); i++ {
 		current := bc.Blocks[i]
@@ -206,8 +207,9 @@ func (bc *Blockchain) Validate(difficulty int) (bool, int, error) {
 		}
 
 		// 4. Proof of work must be valid
-		if len(current.Hash) < difficulty || current.Hash[:difficulty] != target {
-			return false, i, fmt.Errorf("block hash '%s' does not satisfy difficulty target %d (must start with '%s')", current.Hash, difficulty, target)
+		blockTarget := strings.Repeat("0", current.Difficulty)
+		if len(current.Hash) < current.Difficulty || current.Hash[:current.Difficulty] != blockTarget {
+			return false, i, fmt.Errorf("block hash '%s' does not satisfy difficulty target %d (must start with '%s')", current.Hash, current.Difficulty, blockTarget)
 		}
 
 		// 5. Check timestamp consistency (chronological order)

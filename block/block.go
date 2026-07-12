@@ -9,5 +9,6 @@ type Block struct {
 	Transactions []transaction.Transaction   `json:"transactions"`
 	PreviousHash string                      `json:"previousHash"`
 	Nonce        int                         `json:"nonce"`
+	Difficulty   int                         `json:"difficulty"`
 	Hash         string                      `json:"hash"`
 }
