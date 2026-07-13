@@ -88,6 +88,21 @@
       "nonce": 815,
       "difficulty": 3,
       "hash": "000d60a503bbe1d991e55562dc56b59af2876eb92bd7a99732c3930bad11ed24"
+    },
+    {
+      "index": 5,
+      "timestamp": 1783930338,
+      "transactions": [
+        {
+          "sender": "faucet",
+          "receiver": "alice",
+          "amount": 100
+        }
+      ],
+      "previousHash": "000d60a503bbe1d991e55562dc56b59af2876eb92bd7a99732c3930bad11ed24",
+      "nonce": 21231,
+      "difficulty": 4,
+      "hash": "0000ed0ec48a8424ff987f3eb5541af69a92a20920f06804ae53a890597199db"
     }
   ],
   "pending_transactions": []

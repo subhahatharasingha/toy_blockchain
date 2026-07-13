@@ -131,7 +131,13 @@ func mineBlock(bc *blockchain.Blockchain) {
 	fmt.Printf("Mining block %d with %d transactions (difficulty target: %d)...\n",
 		blockData.Index, len(blockData.Transactions), *difficultyFlag)
 
-	nonce, elapsed := mining.MineBlock(&blockData, *difficultyFlag)
+	workers := 4
+
+    nonce, elapsed := mining.ConcurrentMineBlock(
+       &blockData,
+       *difficultyFlag,
+       workers,
+    )
 
 	bc.AddMinedBlock(blockData)
 
@@ -142,6 +148,7 @@ func mineBlock(bc *blockchain.Blockchain) {
 	}
 
 	fmt.Printf("Block %d mined successfully!\n", blockData.Index)
+	fmt.Printf("  Workers used: %d\n", workers)
 	fmt.Printf("  Nonce found:  %d\n", nonce)
 	fmt.Printf("  Block Hash:   %s\n", blockData.Hash)
 	fmt.Printf("  Time elapsed: %s\n", elapsed)
