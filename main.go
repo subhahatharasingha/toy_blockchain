@@ -32,6 +32,7 @@ func printUsage() {
 	fmt.Println("  print                              - Print the full blockchain details")
 	fmt.Println("  balance <user>                     - Get the balance of a specific user")
 	fmt.Println("  validate                           - Validate the full chain integrity")
+	fmt.Println("  resolve                            - Resolve forks and choose the longest valid chain")
 	fmt.Println("  save                               - Save current memory state (utility command)")
 }
 
@@ -64,6 +65,8 @@ func main() {
 		getBalance(bc, args)
 	case "validate":
 		validateChain(bc)
+	case "resolve":
+		resolveForks(bc)
 	case "save":
 		// Explicit save command if the user wants to ensure write is flushed
 		err := storage.Save(bc, *fileFlag)
@@ -191,5 +194,20 @@ func validateChain(bc *blockchain.Blockchain) {
 		fmt.Println("Blockchain is INVALID!")
 		fmt.Printf("  First offending block index: %d\n", index)
 		fmt.Printf("  Reason: %v\n", err)
+	}
+}
+
+func resolveForks(bc *blockchain.Blockchain) {
+	replaced := bc.ResolveForks()
+	err := storage.Save(bc, *fileFlag)
+	if err != nil {
+		fmt.Printf("Error saving blockchain: %v\n", err)
+		return
+	}
+
+	if replaced {
+		fmt.Println("Fork resolved. Replaced chain with longer valid chain.")
+	} else {
+		fmt.Println("No longer valid fork found.")
 	}
 }

@@ -19,6 +19,7 @@ const GenesisTimestamp = 1719830400 // July 1, 2024, 00:00:00 UTC
 type Blockchain struct {
 	Blocks              []block.Block             `json:"blocks"`
 	PendingTransactions []transaction.Transaction `json:"pending_transactions"`
+	Forks               [][]block.Block           `json:"forks"`
 }
 
 // NewBlockchain creates a blockchain containing only the genesis block.
@@ -26,6 +27,7 @@ func NewBlockchain() *Blockchain {
 	bc := &Blockchain{
 		Blocks:              []block.Block{},
 		PendingTransactions: []transaction.Transaction{},
+		Forks:               [][]block.Block{},
 	}
 
 	genesis := createGenesisBlock()
@@ -165,6 +167,8 @@ func (bc *Blockchain) AddMinedBlock(b block.Block) {
 
 // PrintChain prints details of every block in the chain to the console.
 func (bc *Blockchain) PrintChain() {
+	fmt.Printf("Blocks: %d\n", len(bc.Blocks))
+	fmt.Printf("Forks available: %d\n", len(bc.Forks))
 	for _, b := range bc.Blocks {
 		fmt.Println("-----------------------------------")
 		fmt.Printf("Index:        %d\n", b.Index)
