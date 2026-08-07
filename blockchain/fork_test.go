@@ -1,36 +1,14 @@
 package blockchain_test
 
 import (
-	"fmt"
 	"testing"
 	"toy-blockchain/block"
 	"toy-blockchain/blockchain"
 	"toy-blockchain/mining"
 	"toy-blockchain/transaction"
 	"toy-blockchain/utils"
+	"toy-blockchain/wallet"
 )
-
-func signTxForForkTest(t *testing.T, sender, receiver string, amount float64) transaction.Transaction {
-	tx := transaction.Transaction{
-		Sender:   sender,
-		Receiver: receiver,
-		Amount:   amount,
-	}
-	if sender != "system" && sender != "faucet" {
-		privKey, pubKey, err := utils.GenerateKeyPair()
-		if err != nil {
-			t.Fatalf("GenerateKeyPair failed: %v", err)
-		}
-		data := sender + receiver + fmt.Sprintf("%f", amount)
-		sig, err := utils.SignTransaction(data, privKey)
-		if err != nil {
-			t.Fatalf("SignTransaction failed: %v", err)
-		}
-		tx.PublicKey = pubKey
-		tx.Signature = sig
-	}
-	return tx
-}
 
 func mineNextBlockForTest(t *testing.T, blocks []block.Block, txs []transaction.Transaction) block.Block {
 	prevBlock := blocks[len(blocks)-1]
@@ -53,27 +31,49 @@ func TestValidLongerForkReplacement(t *testing.T) {
 	bc := blockchain.NewBlockchain()
 	genesis := bc.Blocks[0]
 
+	alice, _ := wallet.NewWallet()
+	bob, _ := wallet.NewWallet()
+	charlie, _ := wallet.NewWallet()
+	david, _ := wallet.NewWallet()
+	eve, _ := wallet.NewWallet()
+
 	// 1. Build main chain of length 3
-	txs1 := []transaction.Transaction{signTxForForkTest(t, "faucet", "alice", 10.0)}
+	txs1 := []transaction.Transaction{{Sender: "faucet", Receiver: alice.Address, Amount: 10.0}}
 	b1_main := mineNextBlockForTest(t, []block.Block{genesis}, txs1)
 
-	txs2 := []transaction.Transaction{signTxForForkTest(t, "alice", "bob", 5.0)}
+	txAliceBob, err := transaction.NewSignedTransaction(alice, bob.Address, 5.0)
+	if err != nil {
+		t.Fatalf("Failed to create signed transaction: %v", err)
+	}
+	txs2 := []transaction.Transaction{txAliceBob}
 	b2_main := mineNextBlockForTest(t, []block.Block{genesis, b1_main}, txs2)
 
 	mainChain := []block.Block{genesis, b1_main, b2_main}
 	bc.Blocks = mainChain
 
 	// 2. Build competing fork chain of length 5 starting from genesis
-	txs1_fork := []transaction.Transaction{signTxForForkTest(t, "faucet", "charlie", 20.0)}
+	txs1_fork := []transaction.Transaction{{Sender: "faucet", Receiver: charlie.Address, Amount: 20.0}}
 	b1_fork := mineNextBlockForTest(t, []block.Block{genesis}, txs1_fork)
 
-	txs2_fork := []transaction.Transaction{signTxForForkTest(t, "charlie", "david", 10.0)}
+	txCharlieDavid, err := transaction.NewSignedTransaction(charlie, david.Address, 10.0)
+	if err != nil {
+		t.Fatalf("Failed to create signed transaction: %v", err)
+	}
+	txs2_fork := []transaction.Transaction{txCharlieDavid}
 	b2_fork := mineNextBlockForTest(t, []block.Block{genesis, b1_fork}, txs2_fork)
 
-	txs3_fork := []transaction.Transaction{signTxForForkTest(t, "david", "eve", 5.0)}
+	txDavidEve, err := transaction.NewSignedTransaction(david, eve.Address, 5.0)
+	if err != nil {
+		t.Fatalf("Failed to create signed transaction: %v", err)
+	}
+	txs3_fork := []transaction.Transaction{txDavidEve}
 	b3_fork := mineNextBlockForTest(t, []block.Block{genesis, b1_fork, b2_fork}, txs3_fork)
 
-	txs4_fork := []transaction.Transaction{signTxForForkTest(t, "eve", "faucet", 2.0)}
+	txEveFaucet, err := transaction.NewSignedTransaction(eve, "faucet", 2.0)
+	if err != nil {
+		t.Fatalf("Failed to create signed transaction: %v", err)
+	}
+	txs4_fork := []transaction.Transaction{txEveFaucet}
 	b4_fork := mineNextBlockForTest(t, []block.Block{genesis, b1_fork, b2_fork, b3_fork}, txs4_fork)
 
 	forkChain := []block.Block{genesis, b1_fork, b2_fork, b3_fork, b4_fork}
@@ -103,27 +103,49 @@ func TestInvalidForkRejected(t *testing.T) {
 	bc := blockchain.NewBlockchain()
 	genesis := bc.Blocks[0]
 
+	alice, _ := wallet.NewWallet()
+	bob, _ := wallet.NewWallet()
+	charlie, _ := wallet.NewWallet()
+	david, _ := wallet.NewWallet()
+	eve, _ := wallet.NewWallet()
+
 	// 1. Build main chain of length 3
-	txs1 := []transaction.Transaction{signTxForForkTest(t, "faucet", "alice", 10.0)}
+	txs1 := []transaction.Transaction{{Sender: "faucet", Receiver: alice.Address, Amount: 10.0}}
 	b1_main := mineNextBlockForTest(t, []block.Block{genesis}, txs1)
 
-	txs2 := []transaction.Transaction{signTxForForkTest(t, "alice", "bob", 5.0)}
+	txAliceBob, err := transaction.NewSignedTransaction(alice, bob.Address, 5.0)
+	if err != nil {
+		t.Fatalf("Failed to create signed transaction: %v", err)
+	}
+	txs2 := []transaction.Transaction{txAliceBob}
 	b2_main := mineNextBlockForTest(t, []block.Block{genesis, b1_main}, txs2)
 
 	mainChain := []block.Block{genesis, b1_main, b2_main}
 	bc.Blocks = mainChain
 
 	// 2. Build invalid competing fork chain of length 5 starting from genesis
-	txs1_fork := []transaction.Transaction{signTxForForkTest(t, "faucet", "charlie", 20.0)}
+	txs1_fork := []transaction.Transaction{{Sender: "faucet", Receiver: charlie.Address, Amount: 20.0}}
 	b1_fork := mineNextBlockForTest(t, []block.Block{genesis}, txs1_fork)
 
-	txs2_fork := []transaction.Transaction{signTxForForkTest(t, "charlie", "david", 10.0)}
+	txCharlieDavid, err := transaction.NewSignedTransaction(charlie, david.Address, 10.0)
+	if err != nil {
+		t.Fatalf("Failed to create signed transaction: %v", err)
+	}
+	txs2_fork := []transaction.Transaction{txCharlieDavid}
 	b2_fork := mineNextBlockForTest(t, []block.Block{genesis, b1_fork}, txs2_fork)
 
-	txs3_fork := []transaction.Transaction{signTxForForkTest(t, "david", "eve", 5.0)}
+	txDavidEve, err := transaction.NewSignedTransaction(david, eve.Address, 5.0)
+	if err != nil {
+		t.Fatalf("Failed to create signed transaction: %v", err)
+	}
+	txs3_fork := []transaction.Transaction{txDavidEve}
 	b3_fork := mineNextBlockForTest(t, []block.Block{genesis, b1_fork, b2_fork}, txs3_fork)
 
-	txs4_fork := []transaction.Transaction{signTxForForkTest(t, "eve", "faucet", 2.0)}
+	txEveFaucet, err := transaction.NewSignedTransaction(eve, "faucet", 2.0)
+	if err != nil {
+		t.Fatalf("Failed to create signed transaction: %v", err)
+	}
+	txs4_fork := []transaction.Transaction{txEveFaucet}
 	b4_fork := mineNextBlockForTest(t, []block.Block{genesis, b1_fork, b2_fork, b3_fork}, txs4_fork)
 
 	// Tamper with a block's transactions list
@@ -152,27 +174,50 @@ func TestShorterForkIgnored(t *testing.T) {
 	bc := blockchain.NewBlockchain()
 	genesis := bc.Blocks[0]
 
+	alice, _ := wallet.NewWallet()
+	bob, _ := wallet.NewWallet()
+	charlie, _ := wallet.NewWallet()
+	david, _ := wallet.NewWallet()
+	eve, _ := wallet.NewWallet()
+	frank, _ := wallet.NewWallet()
+
 	// 1. Build main chain of length 5
-	txs1 := []transaction.Transaction{signTxForForkTest(t, "faucet", "alice", 10.0)}
+	txs1 := []transaction.Transaction{{Sender: "faucet", Receiver: alice.Address, Amount: 10.0}}
 	b1_main := mineNextBlockForTest(t, []block.Block{genesis}, txs1)
 
-	txs2 := []transaction.Transaction{signTxForForkTest(t, "alice", "bob", 5.0)}
+	txAliceBob, err := transaction.NewSignedTransaction(alice, bob.Address, 5.0)
+	if err != nil {
+		t.Fatalf("Failed to create signed transaction: %v", err)
+	}
+	txs2 := []transaction.Transaction{txAliceBob}
 	b2_main := mineNextBlockForTest(t, []block.Block{genesis, b1_main}, txs2)
 
-	txs3 := []transaction.Transaction{signTxForForkTest(t, "bob", "charlie", 2.0)}
+	txBobCharlie, err := transaction.NewSignedTransaction(bob, charlie.Address, 2.0)
+	if err != nil {
+		t.Fatalf("Failed to create signed transaction: %v", err)
+	}
+	txs3 := []transaction.Transaction{txBobCharlie}
 	b3_main := mineNextBlockForTest(t, []block.Block{genesis, b1_main, b2_main}, txs3)
 
-	txs4 := []transaction.Transaction{signTxForForkTest(t, "charlie", "david", 1.0)}
+	txCharlieDavid, err := transaction.NewSignedTransaction(charlie, david.Address, 1.0)
+	if err != nil {
+		t.Fatalf("Failed to create signed transaction: %v", err)
+	}
+	txs4 := []transaction.Transaction{txCharlieDavid}
 	b4_main := mineNextBlockForTest(t, []block.Block{genesis, b1_main, b2_main, b3_main}, txs4)
 
 	mainChain := []block.Block{genesis, b1_main, b2_main, b3_main, b4_main}
 	bc.Blocks = mainChain
 
 	// 2. Build competing fork chain of length 3 starting from genesis
-	txs1_fork := []transaction.Transaction{signTxForForkTest(t, "faucet", "eve", 20.0)}
+	txs1_fork := []transaction.Transaction{{Sender: "faucet", Receiver: eve.Address, Amount: 20.0}}
 	b1_fork := mineNextBlockForTest(t, []block.Block{genesis}, txs1_fork)
 
-	txs2_fork := []transaction.Transaction{signTxForForkTest(t, "eve", "frank", 10.0)}
+	txEveFrank, err := transaction.NewSignedTransaction(eve, frank.Address, 10.0)
+	if err != nil {
+		t.Fatalf("Failed to create signed transaction: %v", err)
+	}
+	txs2_fork := []transaction.Transaction{txEveFrank}
 	b2_fork := mineNextBlockForTest(t, []block.Block{genesis, b1_fork}, txs2_fork)
 
 	forkChain := []block.Block{genesis, b1_fork, b2_fork}

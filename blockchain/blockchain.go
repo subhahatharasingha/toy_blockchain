@@ -3,8 +3,8 @@ package blockchain
 import (
 	"errors"
 	"fmt"
-	"strings"
 	"math"
+	"strings"
 
 	"toy-blockchain/block"
 	"toy-blockchain/ledger"
@@ -75,7 +75,7 @@ func (bc *Blockchain) VerifyTransaction(tx transaction.Transaction) error {
 			return errors.New("invalid transaction signature")
 		}
 
-		valid := utils.VerifyTransactionSignature(tx)
+		valid := tx.VerifySignature()
 		if !valid {
 			return errors.New("invalid transaction signature")
 		}
@@ -254,7 +254,7 @@ func (bc *Blockchain) Validate(difficulty int) (bool, int, error) {
 		}
 	}
 
-	// 6. Verify transaction signatures across all blocks (skip faucet/system and old unsigned transactions)
+	// 6. Verify transaction signatures across all blocks (skip faucet/system)
 	for i := 0; i < len(bc.Blocks); i++ {
 		current := bc.Blocks[i]
 		for _, tx := range current.Transactions {
@@ -262,9 +262,9 @@ func (bc *Blockchain) Validate(difficulty int) (bool, int, error) {
 				continue
 			}
 			if tx.PublicKey == "" || tx.Signature == "" {
-				continue // Handle missing signature fields safely for old transactions
+				return false, i, fmt.Errorf("missing signature fields for transaction")
 			}
-			if !utils.VerifyTransactionSignature(tx) {
+			if !tx.VerifySignature() {
 				return false, i, fmt.Errorf("invalid transaction signature")
 			}
 		}

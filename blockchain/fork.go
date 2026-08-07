@@ -119,9 +119,9 @@ func ValidateChain(chain []block.Block) bool {
 				continue
 			}
 			if tx.PublicKey == "" || tx.Signature == "" {
-				continue
+				return false
 			}
-			if !utils.VerifyTransactionSignature(tx) {
+			if !tx.VerifySignature() {
 				return false
 			}
 		}
