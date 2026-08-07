@@ -62,6 +62,12 @@
       "hash": "037720e1ccb300e6d1cc79c84485fa5e15d62c454b019f83acb910cf6dccbc8d"
     }
   ],
-  "pending_transactions": [],
+  "pending_transactions": [
+    {
+      "sender": "faucet",
+      "receiver": "subha",
+      "amount": 100
+    }
+  ],
   "forks": []
 }
