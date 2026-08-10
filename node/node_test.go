@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -432,7 +433,6 @@ func TestFindCommonAncestor(t *testing.T) {
 	b1 := mineNextTestBlock(bc.Blocks[0])
 	b2a := mineNextTestBlock(b1)
 	
-	// Diverge by setting a different timestamp for b2b
 	b2b := b1
 	b2b.Timestamp += 5
 	b2b = mineNextTestBlock(b2b)
@@ -672,7 +672,7 @@ func TestOutOfOrderBlockHandling(t *testing.T) {
 	mineBlockOnNode(nodeB)
 	mineBlockOnNode(nodeB)
 
-	// Now connect as peers
+	// Connect peers afterwards
 	_ = nodeA.AddPeer(node.Peer{ID: nodeB.ID, Host: nodeB.Host, Port: nodeB.Port})
 	_ = nodeB.AddPeer(node.Peer{ID: nodeA.ID, Host: nodeA.Host, Port: nodeA.Port})
 
@@ -804,10 +804,7 @@ func TestThreeNodeChainSynchronization(t *testing.T) {
 	mineBlockOnNode(nodeC)
 	mineBlockOnNode(nodeC)
 
-	// Converge the network synchronously:
-	// Node B pulls from C (getting length 4)
 	_ = nodeB.SyncWithPeer(node.Peer{ID: nodeC.ID, Host: nodeC.Host, Port: nodeC.Port})
-	// Node A pulls from B (getting length 4)
 	_ = nodeA.SyncWithPeer(node.Peer{ID: nodeB.ID, Host: nodeB.Host, Port: nodeB.Port})
 
 	err := waitForCondition(func() bool {
@@ -918,27 +915,23 @@ func TestCumulativeDifficultyChainSelection(t *testing.T) {
 	}()
 
 	// 1. Higher cumulative difficulty beats a longer but lower-work chain.
-	// Mine Node A (higher work, shorter length: length 7, work 9)
 	for i := 1; i <= 6; i++ {
 		blocks := nodeA.GetBlocks()
 		b := mineNextChainBlock(blocks, blocks[len(blocks)-1].Timestamp+1)
 		nodeA.AddMinedBlock(b)
 	}
 
-	// Mine Node B (lower work, longer length: length 8, work 7)
 	for i := 1; i <= 7; i++ {
 		blocks := nodeB.GetBlocks()
 		b := mineNextChainBlock(blocks, blocks[len(blocks)-1].Timestamp+300)
 		nodeB.AddMinedBlock(b)
 	}
 
-	// Sync Node A with Node B. A has work 9, B has work 7. A must keep its chain.
 	_ = nodeA.SyncWithPeer(node.Peer{ID: nodeB.ID, Host: nodeB.Host, Port: nodeB.Port})
 	if len(nodeA.GetBlocks()) != 7 {
 		t.Errorf("Node A adopted lower work chain; expected 7 blocks, got %d", len(nodeA.GetBlocks()))
 	}
 
-	// Sync Node B with Node A. B has work 7, A has work 9. B must adopt A's chain!
 	err := nodeB.SyncWithPeer(node.Peer{ID: nodeA.ID, Host: nodeA.Host, Port: nodeA.Port})
 	if err != nil {
 		t.Fatalf("Sync failed: %v", err)
@@ -952,12 +945,10 @@ func TestCumulativeDifficultyChainSelection(t *testing.T) {
 	_ = nodeC.StartServer()
 	defer func() { _ = nodeC.Shutdown(context.Background()) }()
 
-	// Node A mines 1 block with 1s increment (total work = 9 + 4 = 13, length = 8)
 	blocksA := nodeA.GetBlocks()
 	bA8 := mineNextChainBlock(blocksA, blocksA[len(blocksA)-1].Timestamp+1)
 	nodeA.AddMinedBlock(bA8)
 
-	// Mine Node C from Genesis with 300s spacing to reach work 13 (requires 13 blocks)
 	for i := 1; i <= 13; i++ {
 		blocks := nodeC.GetBlocks()
 		b := mineNextChainBlock(blocks, blocks[len(blocks)-1].Timestamp+300)
@@ -968,8 +959,6 @@ func TestCumulativeDifficultyChainSelection(t *testing.T) {
 	workC := blockchain.CalculateCumulativeDifficulty(nodeC.GetBlocks())
 	fmt.Printf("DEBUG TEST: A work=%d len=%d, C work=%d len=%d\n", workA, len(nodeA.GetBlocks()), workC, len(nodeC.GetBlocks()))
 
-	// Sync Node A with Node C.
-	// Equal work (13 == 13), but Node C is longer (14 > 8). Node A must adopt C's chain.
 	err = nodeA.SyncWithPeer(node.Peer{ID: nodeC.ID, Host: nodeC.Host, Port: nodeC.Port})
 	if err != nil {
 		t.Fatalf("Sync failed: %v", err)
@@ -984,12 +973,10 @@ func TestCumulativeDifficultyChainSelection(t *testing.T) {
 	defer func() { _ = nodeD.Shutdown(context.Background()) }()
 	_ = nodeD.SyncWithPeer(node.Peer{ID: nodeA.ID, Host: nodeA.Host, Port: nodeA.Port})
 
-	// Node A mines block 11 (work = 13 + 1 = 14, length = 12)
 	blocksA = nodeA.GetBlocks()
 	bA10 := mineNextChainBlock(blocksA, blocksA[len(blocksA)-1].Timestamp+300)
 	nodeA.AddMinedBlock(bA10)
 
-	// Node D mines block 11 with different content (work = 13 + 1 = 14, length = 12)
 	blocksD := nodeD.GetBlocks()
 	faucetTx := transaction.Transaction{Sender: "faucet", Receiver: "alice", Amount: 5.0}
 	faucetTx.ID, _ = faucetTx.CalculateID()
@@ -1005,9 +992,298 @@ func TestCumulativeDifficultyChainSelection(t *testing.T) {
 	}
 }
 
-// Helpers
-var dummyCounter int64
+// Phase 5 Tests
 
+func TestConcurrentStressNode(t *testing.T) {
+	n := node.NewNode("stress-node", "127.0.0.1", 0, nil)
+	err := n.StartServer()
+	if err != nil {
+		t.Fatalf("Failed to start server: %v", err)
+	}
+	defer func() { _ = n.Shutdown(context.Background()) }()
+
+	alice, _ := wallet.NewWallet()
+	faucetTx := transaction.Transaction{Sender: "faucet", Receiver: alice.Address, Amount: 1000.0}
+	_ = n.AddTransaction(faucetTx)
+	mineBlockOnNode(n)
+
+	var wgWorkers sync.WaitGroup
+	var testErr error
+	var errOnce sync.Once
+	setErr := func(e error) {
+		errOnce.Do(func() { testErr = e })
+	}
+
+	// Concurrently submit transactions, query introspection endpoints, add/remove peers, mine and synchronize
+	client := &http.Client{Timeout: 1 * time.Second}
+	workers := 20
+	rounds := 30
+
+	for w := 0; w < workers; w++ {
+		wgWorkers.Add(1)
+		go func(workerID int) {
+			defer wgWorkers.Done()
+			for r := 0; r < rounds; r++ {
+				// 1. Submit transaction
+				tx, err := transaction.NewSignedTransaction(alice, "bob", 0.01)
+				if err == nil {
+					tx.ID, _ = tx.CalculateID()
+					data, _ := json.Marshal(tx)
+					resp, err := client.Post(fmt.Sprintf("http://127.0.0.1:%d/transactions", n.Port), "application/json", bytes.NewBuffer(data))
+					if err == nil {
+						_ = resp.Body.Close()
+					}
+				}
+
+				// 2. Query introspection
+				resp, err := client.Get(fmt.Sprintf("http://127.0.0.1:%d/node", n.Port))
+				if err == nil {
+					_ = resp.Body.Close()
+				}
+
+				resp2, err := client.Get(fmt.Sprintf("http://127.0.0.1:%d/peers", n.Port))
+				if err == nil {
+					_ = resp2.Body.Close()
+				}
+
+				// 3. Add / Remove Peer
+				p := node.Peer{
+					ID:   fmt.Sprintf("peer-%d-%d", workerID, r),
+					Host: "127.0.0.1",
+					Port: 9000 + workerID,
+				}
+				_ = n.AddPeer(p)
+				_ = n.RemovePeer(p.ID)
+
+				// 4. Retrieve state copies
+				_ = n.GetBlocks()
+				_ = n.GetPendingTransactions()
+				_ = n.GetPeers()
+			}
+		}(w)
+	}
+
+	// Mining worker
+	var wgMining sync.WaitGroup
+	stopMining := make(chan bool)
+	wgMining.Add(1)
+	go func() {
+		defer wgMining.Done()
+		ticker := time.NewTicker(10 * time.Millisecond)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-stopMining:
+				return
+			case <-ticker.C:
+				func() {
+					defer func() {
+						if r := recover(); r != nil {
+							setErr(fmt.Errorf("Mining panicked: %v", r))
+						}
+					}()
+					txs := n.GetPendingTransactions()
+					if len(txs) > 0 {
+						blockData, err := n.CreatePendingBlock(10)
+						if err == nil {
+							blocks := n.GetBlocks()
+							blockData.Timestamp = blocks[len(blocks)-1].Timestamp + 1
+							toy_mining.MineBlock(&blockData, blockData.Difficulty)
+							n.AddMinedBlockAndGossip(blockData)
+						}
+					}
+				}()
+			}
+		}
+	}()
+
+	wgWorkers.Wait()
+	close(stopMining)
+	wgMining.Wait()
+
+	if testErr != nil {
+		t.Fatalf("Stress test encountered error: %v", testErr)
+	}
+}
+
+func TestThreeNodeClusterIntegration(t *testing.T) {
+	// 1. Initialize three independent nodes on dynamic ports with independent blockchains
+	nodeA := node.NewNode("node-a", "127.0.0.1", 0, blockchain.NewBlockchain())
+	nodeB := node.NewNode("node-b", "127.0.0.1", 0, blockchain.NewBlockchain())
+	nodeC := node.NewNode("node-c", "127.0.0.1", 0, blockchain.NewBlockchain())
+
+	// Start all HTTP servers
+	if err := nodeA.StartServer(); err != nil {
+		t.Fatalf("Start Node A failed: %v", err)
+	}
+	if err := nodeB.StartServer(); err != nil {
+		t.Fatalf("Start Node B failed: %v", err)
+	}
+	if err := nodeC.StartServer(); err != nil {
+		t.Fatalf("Start Node C failed: %v", err)
+	}
+
+	defer func() {
+		_ = nodeA.Shutdown(context.Background())
+		_ = nodeB.Shutdown(context.Background())
+		_ = nodeC.Shutdown(context.Background())
+	}()
+
+	// 2. Configure Ring Topology: A ↔ B, B ↔ C, C ↔ A
+	peerA := node.Peer{ID: nodeA.ID, Host: nodeA.Host, Port: nodeA.Port}
+	peerB := node.Peer{ID: nodeB.ID, Host: nodeB.Host, Port: nodeB.Port}
+	peerC := node.Peer{ID: nodeC.ID, Host: nodeC.Host, Port: nodeC.Port}
+
+	_ = nodeA.AddPeer(peerB)
+	_ = nodeA.AddPeer(peerC)
+	_ = nodeB.AddPeer(peerA)
+	_ = nodeB.AddPeer(peerC)
+	_ = nodeC.AddPeer(peerA)
+	_ = nodeC.AddPeer(peerB)
+
+	// Seed faucet transaction to Node A, B, C to allow initial mining
+	alice, _ := wallet.NewWallet()
+	faucetTx := transaction.Transaction{Sender: "faucet", Receiver: alice.Address, Amount: 1000.0}
+	faucetTx.ID, _ = faucetTx.CalculateID()
+
+	// Add faucet transaction to Node A and gossip it to B and C
+	client := &http.Client{Timeout: 1 * time.Second}
+	data, _ := json.Marshal(faucetTx)
+	resp, err := client.Post(fmt.Sprintf("http://127.0.0.1:%d/transactions", nodeA.Port), "application/json", bytes.NewBuffer(data))
+	if err != nil {
+		t.Fatalf("Post transaction failed: %v", err)
+	}
+	_ = resp.Body.Close()
+
+	// 3-5. Verify transaction propagation to B and C
+	err = waitForCondition(func() bool {
+		return len(nodeB.GetPendingTransactions()) == 1 && len(nodeC.GetPendingTransactions()) == 1
+	}, 3*time.Second)
+	if err != nil {
+		t.Fatalf("Transaction failed to propagate: Node B has %d, Node C has %d",
+			len(nodeB.GetPendingTransactions()), len(nodeC.GetPendingTransactions()))
+	}
+
+	// 6. Ensure transaction exists only once in each mempool (no duplicates)
+	if len(nodeA.GetPendingTransactions()) != 1 || len(nodeB.GetPendingTransactions()) != 1 {
+		t.Errorf("Mempool size mismatch")
+	}
+
+	// 7-8. Mine a block containing faucetTx on Node A, and gossip it
+	mineBlockOnNode(nodeA)
+
+	// 9. Verify the block propagates to all nodes, clearing transaction from mempools
+	err = waitForCondition(func() bool {
+		return len(nodeA.GetBlocks()) == 2 && len(nodeB.GetBlocks()) == 2 && len(nodeC.GetBlocks()) == 2
+	}, 4*time.Second)
+	if err != nil {
+		t.Fatalf("Block failed to propagate: Node A length=%d, Node B length=%d, Node C length=%d",
+			len(nodeA.GetBlocks()), len(nodeB.GetBlocks()), len(nodeC.GetBlocks()))
+	}
+
+	// Mempools should be empty now
+	if len(nodeA.GetPendingTransactions()) != 0 || len(nodeB.GetPendingTransactions()) != 0 {
+		t.Errorf("Mempools were not cleared after block propagation")
+	}
+
+	// 10. Verify all nodes have the exact same tip chain
+	if nodeA.GetBlocks()[1].Hash != nodeB.GetBlocks()[1].Hash || nodeA.GetBlocks()[1].Hash != nodeC.GetBlocks()[1].Hash {
+		t.Errorf("Nodes converged to different blocks")
+	}
+
+	// 11. Create a Fork Scenario
+	// Temporarily disconnect Node A and Node C from each other and from B to mine forks
+	_ = nodeA.RemovePeer(nodeB.ID)
+	_ = nodeA.RemovePeer(nodeC.ID)
+	_ = nodeC.RemovePeer(nodeA.ID)
+	_ = nodeC.RemovePeer(nodeB.ID)
+
+	// Node A mines 2 blocks with 1s increments (higher work/difficulty adjustment)
+	// B2_A: diff 1 (based on [Gen, B1] where B1 has diff 1)
+	// B3_A: diff 2 (preceding has length 3, speed is high, adjustments triggered)
+	// Node A total blocks = 4 (Gen, B1, B2_A, B3_A). Cumulative work = 1 (B1) + 1 (B2) + 2 (B3) = 4.
+	// Node A mines 5 blocks with 1s increments (higher work/difficulty adjustment)
+	for i := 1; i <= 5; i++ {
+		blocksA := nodeA.GetBlocks()
+		b := mineNextChainBlock(blocksA, blocksA[len(blocksA)-1].Timestamp+1)
+		nodeA.AddMinedBlock(b)
+	}
+	// Node A total blocks = 7, cumulative work = 9.
+
+	// Node C mines 3 blocks with 300s spacing (diff remains 1, lower work)
+	for i := 1; i <= 3; i++ {
+		blocksC := nodeC.GetBlocks()
+		b := mineNextChainBlock(blocksC, blocksC[len(blocksC)-1].Timestamp+300)
+		nodeC.AddMinedBlock(b)
+	}
+	// Node C total blocks = 5, cumulative work = 4.
+
+
+	// Add a distinct signed transaction to Node C before it gets reorganized
+	bob, _ := wallet.NewWallet()
+	txC, _ := transaction.NewSignedTransaction(alice, bob.Address, 5.0)
+	txC.ID, _ = txC.CalculateID()
+	_ = nodeC.AddTransaction(txC)
+
+	// 15. Verify offline peer: Node B is stopped
+	err = nodeB.Shutdown(context.Background())
+	if err != nil {
+		t.Fatalf("Failed to shutdown Node B: %v", err)
+	}
+
+	// 16. Re-enable Node B, reconnect peers, and trigger recovery synchronization
+	nodeB.Port = 0 // Reset port to 0 to allocate a new dynamic port and avoid TIME_WAIT reuse issues
+	if err := nodeB.StartServer(); err != nil {
+		t.Fatalf("Failed to restart Node B: %v", err)
+	}
+
+	
+	// Reconnect peers A ↔ B ↔ C ↔ A
+	peerA.Port = nodeA.Port
+	peerB.Port = nodeB.Port
+	peerC.Port = nodeC.Port
+
+	_ = nodeA.AddPeer(peerB)
+	_ = nodeA.AddPeer(peerC)
+	_ = nodeB.AddPeer(peerA)
+	_ = nodeB.AddPeer(peerC)
+	_ = nodeC.AddPeer(peerA)
+	_ = nodeC.AddPeer(peerB)
+
+	// Trigger synchronization explicitly and synchronously
+	_ = nodeB.SyncWithPeer(peerA)
+	_ = nodeC.SyncWithPeer(peerA)
+
+
+	// 12-13. Verify preferred-chain selection (higher cumulative difficulty wins over length) and convergence
+	err = waitForCondition(func() bool {
+		return len(nodeA.GetBlocks()) == 7 && len(nodeB.GetBlocks()) == 7 && len(nodeC.GetBlocks()) == 7
+	}, 5*time.Second)
+	if err != nil {
+		t.Fatalf("Nodes failed to converge on preferred chain: A=%d, B=%d, C=%d blocks",
+			len(nodeA.GetBlocks()), len(nodeB.GetBlocks()), len(nodeC.GetBlocks()))
+	}
+
+	// All nodes must have adopted A's chain
+	if nodeB.GetBlocks()[6].Hash != nodeA.GetBlocks()[6].Hash || nodeC.GetBlocks()[6].Hash != nodeA.GetBlocks()[6].Hash {
+		t.Errorf("Nodes did not converge to the same preferred chain hash")
+	}
+
+	// 14. Verify orphaned transactions (txC in Node C's orphaned branch) are restored to mempools
+	pendingC := nodeC.GetPendingTransactions()
+	found := false
+	for _, tx := range pendingC {
+		if tx.ID == txC.ID {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("Orphaned transaction txC was not restored to Node C pending pool")
+	}
+}
+
+// Helpers
 func mineBlockOnNode(n *node.Node) {
 	txs := n.GetPendingTransactions()
 	if len(txs) == 0 {
@@ -1033,7 +1309,6 @@ func mineBlockOnNode(n *node.Node) {
 	toy_mining.MineBlock(&blockData, blockData.Difficulty)
 	n.AddMinedBlockAndGossip(blockData)
 }
-
 
 func mineNextTestBlock(prev block.Block) block.Block {
 	b := block.Block{
@@ -1064,7 +1339,6 @@ func mineNextChainBlock(chain []block.Block, ts int64) block.Block {
 	return b
 }
 
-
 func waitForCondition(cond func() bool, timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
@@ -1075,3 +1349,4 @@ func waitForCondition(cond func() bool, timeout time.Duration) error {
 	}
 	return fmt.Errorf("condition not met within timeout")
 }
+var dummyCounter int64

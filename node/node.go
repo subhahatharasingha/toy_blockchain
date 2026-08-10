@@ -30,15 +30,17 @@ type Node struct {
 	Blockchain *blockchain.Blockchain
 
 	httpServer *http.Server
-	mu         sync.Mutex // guards httpServer and Port
+	serverMu   sync.Mutex // Guards httpServer lifecycle and dynamic Port
+
+	blockchainMu sync.Mutex // Guards Blockchain state (blocks, pending pool, forks)
 
 	peers   map[string]Peer
-	peersMu sync.RWMutex // guards peers map
+	peersMu sync.RWMutex // Guards peers map configuration
 
 	seenTxs      map[string]struct{}
-	seenTxsMu    sync.RWMutex // guards seenTxs map
+	seenTxsMu    sync.RWMutex // Guards seen transaction IDs cache
 	seenBlocks   map[string]struct{}
-	seenBlocksMu sync.RWMutex // guards seenBlocks map
+	seenBlocksMu sync.RWMutex // Guards seen block hashes cache
 }
 
 // NewNode creates and initializes a new Node.
@@ -61,16 +63,16 @@ func NewNode(id string, host string, port int, bc *blockchain.Blockchain) *Node 
 // StartServer starts the HTTP server on the configured Host and Port.
 // If the server is already running, it returns an error.
 func (n *Node) StartServer() error {
-	n.mu.Lock()
+	n.serverMu.Lock()
 	if n.httpServer != nil {
-		n.mu.Unlock()
+		n.serverMu.Unlock()
 		return fmt.Errorf("server already running")
 	}
 
 	addr := fmt.Sprintf("%s:%d", n.Host, n.Port)
 	listener, err := net.Listen("tcp", addr)
 	if err != nil {
-		n.mu.Unlock()
+		n.serverMu.Unlock()
 		return err
 	}
 
@@ -94,7 +96,7 @@ func (n *Node) StartServer() error {
 		Handler: mux,
 	}
 	n.httpServer = server
-	n.mu.Unlock()
+	n.serverMu.Unlock()
 
 	go func() {
 		_ = server.Serve(listener)
@@ -106,27 +108,27 @@ func (n *Node) StartServer() error {
 // Shutdown cleanly stops the node's HTTP server.
 // If the server is not running, it returns nil.
 func (n *Node) Shutdown(ctx context.Context) error {
-	n.mu.Lock()
+	n.serverMu.Lock()
 	server := n.httpServer
 	if server == nil {
-		n.mu.Unlock()
+		n.serverMu.Unlock()
 		return nil
 	}
-	n.mu.Unlock()
+	n.serverMu.Unlock()
 
 	err := server.Shutdown(ctx)
 
-	n.mu.Lock()
+	n.serverMu.Lock()
 	n.httpServer = nil
-	n.mu.Unlock()
+	n.serverMu.Unlock()
 
 	return err
 }
 
 // IsServerRunning returns true if the HTTP server is currently running.
 func (n *Node) IsServerRunning() bool {
-	n.mu.Lock()
-	defer n.mu.Unlock()
+	n.serverMu.Lock()
+	defer n.serverMu.Unlock()
 	return n.httpServer != nil
 }
 
@@ -146,10 +148,10 @@ func (n *Node) AddPeer(p Peer) error {
 		return fmt.Errorf("node cannot add itself as a peer")
 	}
 
-	n.mu.Lock()
+	n.serverMu.Lock()
 	selfHost := n.Host
 	selfPort := n.Port
-	n.mu.Unlock()
+	n.serverMu.Unlock()
 
 	if p.Host == selfHost && p.Port == selfPort {
 		return fmt.Errorf("node cannot add itself as a peer (matching host and port)")
@@ -170,7 +172,7 @@ func (n *Node) RemovePeer(peerID string) error {
 	return nil
 }
 
-// GetPeers returns a copy of all registered peers configuration.
+// GetPeers returns a safe copy of all registered peers configuration.
 func (n *Node) GetPeers() []Peer {
 	n.peersMu.RLock()
 	defer n.peersMu.RUnlock()
@@ -184,12 +186,13 @@ func (n *Node) GetPeers() []Peer {
 
 // AddMinedBlockAndGossip appends a mined block to the node's local blockchain and gossips it to peers.
 func (n *Node) AddMinedBlockAndGossip(b block.Block) {
-	n.mu.Lock()
+	n.blockchainMu.Lock()
 	n.Blockchain.AddMinedBlock(b)
+	n.blockchainMu.Unlock()
+
 	n.seenBlocksMu.Lock()
 	n.seenBlocks[b.Hash] = struct{}{}
 	n.seenBlocksMu.Unlock()
-	n.mu.Unlock()
 
 	n.gossipBlock(b)
 }
@@ -222,13 +225,13 @@ func (n *Node) handleNodeInfo(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	n.mu.Lock()
+	n.serverMu.Lock()
 	resp := nodeInfoResponse{
 		ID:   n.ID,
 		Host: n.Host,
 		Port: n.Port,
 	}
-	n.mu.Unlock()
+	n.serverMu.Unlock()
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
@@ -270,7 +273,7 @@ func (n *Node) handlePostTransaction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// De-duplication: check if already seen
+	// De-duplication check
 	n.seenTxsMu.Lock()
 	if _, seen := n.seenTxs[tx.ID]; seen {
 		n.seenTxsMu.Unlock()
@@ -282,12 +285,12 @@ func (n *Node) handlePostTransaction(w http.ResponseWriter, r *http.Request) {
 	n.seenTxs[tx.ID] = struct{}{}
 	n.seenTxsMu.Unlock()
 
-	n.mu.Lock()
+	n.blockchainMu.Lock()
 	err = n.Blockchain.AddTransaction(tx)
-	n.mu.Unlock()
+	n.blockchainMu.Unlock()
 
 	if err != nil {
-		// Clean up seen trace so it can be resubmitted if corrected
+		// Remove from seen cache on validation error
 		n.seenTxsMu.Lock()
 		delete(n.seenTxs, tx.ID)
 		n.seenTxsMu.Unlock()
@@ -317,7 +320,7 @@ func (n *Node) handlePostBlock(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// De-duplication: check if already seen
+	// De-duplication check
 	n.seenBlocksMu.Lock()
 	if _, seen := n.seenBlocks[b.Hash]; seen {
 		n.seenBlocksMu.Unlock()
@@ -329,20 +332,19 @@ func (n *Node) handlePostBlock(w http.ResponseWriter, r *http.Request) {
 	n.seenBlocks[b.Hash] = struct{}{}
 	n.seenBlocksMu.Unlock()
 
-	n.mu.Lock()
+	n.blockchainMu.Lock()
 	err = n.Blockchain.VerifyBlock(b)
 	if err == nil {
 		n.Blockchain.AddMinedBlock(b)
 	}
-	n.mu.Unlock()
+	n.blockchainMu.Unlock()
 
 	if err != nil {
-		// Clean up seen trace
 		n.seenBlocksMu.Lock()
 		delete(n.seenBlocks, b.Hash)
 		n.seenBlocksMu.Unlock()
 
-		// Trigger synchronization if block is out-of-order or points to an alternative branch/fork
+		// Trigger synchronization if block is out-of-order
 		go n.SyncWithPeers()
 
 		http.Error(w, fmt.Sprintf("Invalid block: %v", err), http.StatusBadRequest)
@@ -448,7 +450,6 @@ func (n *Node) handlePostSync(w http.ResponseWriter, r *http.Request) {
 	var req syncRequest
 	err := json.NewDecoder(r.Body).Decode(&req)
 	if err != nil || req.Host == "" || req.Port <= 0 {
-		// No peer specified or invalid parameters, trigger sync on all configured peers
 		go n.SyncWithPeers()
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
@@ -503,40 +504,53 @@ func (n *Node) SyncWithPeer(p Peer) error {
 		return fmt.Errorf("failed to decode chain from peer %s: %w", p.ID, err)
 	}
 
-	// Lock the Node state to perform validation, comparison, and potential reorganization
-	n.mu.Lock()
-	defer n.mu.Unlock()
-
-	// 1. Verify and check if the peer's chain is preferred over ours
+	n.blockchainMu.Lock()
+	// Check if peer's chain is preferred over ours
 	if !blockchain.IsPreferredChain(peerBlocks, n.Blockchain.Blocks) {
+		n.blockchainMu.Unlock()
 		return fmt.Errorf("peer %s chain is not preferred or invalid", p.ID)
 	}
 
-	// 2. Perform reorganization and restore orphaned transactions to mempool
+	// Perform reorganization and restore orphaned transactions to mempool
 	err = n.Blockchain.Reorganize(peerBlocks)
 	if err != nil {
+		n.blockchainMu.Unlock()
 		return fmt.Errorf("failed to reorganize local blockchain with peer %s chain: %w", p.ID, err)
 	}
 
-	// 3. Update seen-block cache
+	// Read blocks and pending transactions while holding blockchainMu to update caches
+	blocksCopy := make([]block.Block, len(n.Blockchain.Blocks))
+	for i, b := range n.Blockchain.Blocks {
+		txs := make([]transaction.Transaction, len(b.Transactions))
+		copy(txs, b.Transactions)
+		blocksCopy[i] = b
+		blocksCopy[i].Transactions = txs
+	}
+
+	pendingCopy := make([]transaction.Transaction, len(n.Blockchain.PendingTransactions))
+	copy(pendingCopy, n.Blockchain.PendingTransactions)
+
+	n.blockchainMu.Unlock()
+
+	// Update seen-block cache
 	n.seenBlocksMu.Lock()
 	n.seenBlocks = make(map[string]struct{})
-	for _, b := range n.Blockchain.Blocks {
+	for _, b := range blocksCopy {
 		n.seenBlocks[b.Hash] = struct{}{}
 	}
 	n.seenBlocksMu.Unlock()
 
-	// 4. Update seen-transaction cache
+	// Update seen-transaction cache
 	n.seenTxsMu.Lock()
 	n.seenTxs = make(map[string]struct{})
-	for _, b := range n.Blockchain.Blocks {
+	for _, b := range blocksCopy {
 		for _, tx := range b.Transactions {
 			if tx.ID != "" {
 				n.seenTxs[tx.ID] = struct{}{}
 			}
 		}
 	}
-	for _, tx := range n.Blockchain.PendingTransactions {
+	for _, tx := range pendingCopy {
 		if tx.ID != "" {
 			n.seenTxs[tx.ID] = struct{}{}
 		}
@@ -546,41 +560,46 @@ func (n *Node) SyncWithPeer(p Peer) error {
 	return nil
 }
 
-// GetPendingTransactions returns a copy of the pending transactions in a thread-safe manner.
+// GetPendingTransactions returns a safe copy of the pending transactions.
 func (n *Node) GetPendingTransactions() []transaction.Transaction {
-	n.mu.Lock()
-	defer n.mu.Unlock()
+	n.blockchainMu.Lock()
+	defer n.blockchainMu.Unlock()
 	txs := make([]transaction.Transaction, len(n.Blockchain.PendingTransactions))
 	copy(txs, n.Blockchain.PendingTransactions)
 	return txs
 }
 
-// GetBlocks returns a copy of the blocks in a thread-safe manner.
+// GetBlocks returns a safe, deep copy of the blocks including nested transaction slices.
 func (n *Node) GetBlocks() []block.Block {
-	n.mu.Lock()
-	defer n.mu.Unlock()
+	n.blockchainMu.Lock()
+	defer n.blockchainMu.Unlock()
 	blocks := make([]block.Block, len(n.Blockchain.Blocks))
-	copy(blocks, n.Blockchain.Blocks)
+	for i, b := range n.Blockchain.Blocks {
+		txs := make([]transaction.Transaction, len(b.Transactions))
+		copy(txs, b.Transactions)
+		blocks[i] = b
+		blocks[i].Transactions = txs
+	}
 	return blocks
 }
 
 // AddTransaction adds a transaction to the node's blockchain in a thread-safe manner.
 func (n *Node) AddTransaction(tx transaction.Transaction) error {
-	n.mu.Lock()
-	defer n.mu.Unlock()
+	n.blockchainMu.Lock()
+	defer n.blockchainMu.Unlock()
 	return n.Blockchain.AddTransaction(tx)
 }
 
 // CreatePendingBlock creates a block with pending transactions in a thread-safe manner.
 func (n *Node) CreatePendingBlock(maxTx int) (block.Block, error) {
-	n.mu.Lock()
-	defer n.mu.Unlock()
+	n.blockchainMu.Lock()
+	defer n.blockchainMu.Unlock()
 	return n.Blockchain.CreatePendingBlock(maxTx)
 }
 
 // AddMinedBlock adds a mined block in a thread-safe manner.
 func (n *Node) AddMinedBlock(b block.Block) {
-	n.mu.Lock()
-	defer n.mu.Unlock()
+	n.blockchainMu.Lock()
+	defer n.blockchainMu.Unlock()
 	n.Blockchain.AddMinedBlock(b)
 }
