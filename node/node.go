@@ -10,6 +10,13 @@ import (
 	"toy-blockchain/blockchain"
 )
 
+// Peer represents a configuration of another node in the network.
+type Peer struct {
+	ID   string `json:"id"`
+	Host string `json:"host"`
+	Port int    `json:"port"`
+}
+
 // Node represents a single blockchain node in the network.
 type Node struct {
 	ID         string
@@ -18,7 +25,10 @@ type Node struct {
 	Blockchain *blockchain.Blockchain
 
 	httpServer *http.Server
-	mu         sync.Mutex
+	mu         sync.Mutex // guards httpServer and Port
+
+	peers   map[string]Peer
+	peersMu sync.RWMutex // guards peers map
 }
 
 // NewNode creates and initializes a new Node.
@@ -32,6 +42,7 @@ func NewNode(id string, host string, port int, bc *blockchain.Blockchain) *Node 
 		Host:       host,
 		Port:       port,
 		Blockchain: bc,
+		peers:      make(map[string]Peer),
 	}
 }
 
@@ -99,6 +110,58 @@ func (n *Node) IsServerRunning() bool {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 	return n.httpServer != nil
+}
+
+// AddPeer adds a peer configuration to the node.
+func (n *Node) AddPeer(p Peer) error {
+	if p.ID == "" {
+		return fmt.Errorf("peer ID cannot be empty")
+	}
+	if p.Host == "" {
+		return fmt.Errorf("peer host cannot be empty")
+	}
+	if p.Port <= 0 || p.Port > 65535 {
+		return fmt.Errorf("invalid peer port: %d", p.Port)
+	}
+
+	if p.ID == n.ID {
+		return fmt.Errorf("node cannot add itself as a peer")
+	}
+
+	n.mu.Lock()
+	selfHost := n.Host
+	selfPort := n.Port
+	n.mu.Unlock()
+
+	if p.Host == selfHost && p.Port == selfPort {
+		return fmt.Errorf("node cannot add itself as a peer (matching host and port)")
+	}
+
+	n.peersMu.Lock()
+	defer n.peersMu.Unlock()
+	n.peers[p.ID] = p
+	return nil
+}
+
+// RemovePeer removes a peer configuration from the node.
+func (n *Node) RemovePeer(peerID string) error {
+	n.peersMu.Lock()
+	defer n.peersMu.Unlock()
+
+	delete(n.peers, peerID)
+	return nil
+}
+
+// GetPeers returns a copy of all registered peers configuration.
+func (n *Node) GetPeers() []Peer {
+	n.peersMu.RLock()
+	defer n.peersMu.RUnlock()
+
+	peersList := make([]Peer, 0, len(n.peers))
+	for _, p := range n.peers {
+		peersList = append(peersList, p)
+	}
+	return peersList
 }
 
 // handleHealth responds to health checks.

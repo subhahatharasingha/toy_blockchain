@@ -130,7 +130,7 @@ func TestNodeHTTPServerLifecycleAndEndpoints(t *testing.T) {
 		}
 	}
 
-	// 7 (Already Running Check). Verify calling StartServer() when already running returns error
+	// Verify calling StartServer() when already running returns error
 	err = n.StartServer()
 	if err == nil {
 		t.Error("Expected error when starting an already running server, got nil")
@@ -155,8 +155,7 @@ func TestNodeHTTPServerLifecycleAndEndpoints(t *testing.T) {
 	}
 }
 
-func TestMultipleConcurrentNodes(t *testing.T) {
-	// 6 (Multi-node). Multiple Nodes can use different ports without sharing one global server.
+func TestMultipleHTTPServerNodes(t *testing.T) {
 	n1 := node.NewNode("node-1", "127.0.0.1", 0, nil)
 	n2 := node.NewNode("node-2", "127.0.0.1", 0, nil)
 
@@ -195,4 +194,218 @@ func TestMultipleConcurrentNodes(t *testing.T) {
 	if resp1.StatusCode != http.StatusOK || resp2.StatusCode != http.StatusOK {
 		t.Error("Expected both nodes to return HTTP 200 OK")
 	}
+}
+
+func TestNodeEmptyPeersInitially(t *testing.T) {
+	n := node.NewNode("test-node", "127.0.0.1", 8000, nil)
+	peers := n.GetPeers()
+	if len(peers) != 0 {
+		t.Errorf("Expected peer list to be empty initially, got %v", peers)
+	}
+}
+
+func TestAddAndGetPeer(t *testing.T) {
+	n := node.NewNode("node-self", "127.0.0.1", 8000, nil)
+	p := node.Peer{ID: "peer-1", Host: "127.0.0.2", Port: 8001}
+
+	err := n.AddPeer(p)
+	if err != nil {
+		t.Fatalf("Expected AddPeer to succeed, got error: %v", err)
+	}
+
+	peers := n.GetPeers()
+	if len(peers) != 1 {
+		t.Fatalf("Expected exactly 1 peer, got %d", len(peers))
+	}
+
+	if peers[0].ID != p.ID || peers[0].Host != p.Host || peers[0].Port != p.Port {
+		t.Errorf("Retrieved peer %+v does not match added peer %+v", peers[0], p)
+	}
+}
+
+func TestAddDuplicatePeerNoDuplicates(t *testing.T) {
+	n := node.NewNode("node-self", "127.0.0.1", 8000, nil)
+	p := node.Peer{ID: "peer-1", Host: "127.0.0.2", Port: 8001}
+
+	_ = n.AddPeer(p)
+	// Add identical peer again
+	err := n.AddPeer(p)
+	if err != nil {
+		t.Fatalf("Expected adding duplicate peer to not fail, got error: %v", err)
+	}
+
+	// Add same peer ID with different Host/Port (updates configuration)
+	pUpdated := node.Peer{ID: "peer-1", Host: "127.0.0.3", Port: 8002}
+	err = n.AddPeer(pUpdated)
+	if err != nil {
+		t.Fatalf("Expected updating peer with same ID to succeed, got error: %v", err)
+	}
+
+	peers := n.GetPeers()
+	if len(peers) != 1 {
+		t.Fatalf("Expected exactly 1 peer, got %d", len(peers))
+	}
+	if peers[0].Host != "127.0.0.3" || peers[0].Port != 8002 {
+		t.Errorf("Expected peer config to be updated to 127.0.0.3:8002, got %s:%d", peers[0].Host, peers[0].Port)
+	}
+}
+
+func TestNodeCannotAddSelfAsPeer(t *testing.T) {
+	n := node.NewNode("node-self", "127.0.0.1", 8000, nil)
+
+	// 1. Same ID
+	pSelfID := node.Peer{ID: "node-self", Host: "127.0.0.2", Port: 8001}
+	err := n.AddPeer(pSelfID)
+	if err == nil {
+		t.Error("Expected error when adding self as peer (matching ID), got nil")
+	}
+
+	// 2. Same Host and Port
+	pSelfAddr := node.Peer{ID: "peer-1", Host: "127.0.0.1", Port: 8000}
+	err = n.AddPeer(pSelfAddr)
+	if err == nil {
+		t.Error("Expected error when adding self as peer (matching host/port), got nil")
+	}
+}
+
+func TestPeerValidationRules(t *testing.T) {
+	n := node.NewNode("node-self", "127.0.0.1", 8000, nil)
+
+	// Empty ID
+	pEmptyID := node.Peer{ID: "", Host: "127.0.0.2", Port: 8001}
+	if err := n.AddPeer(pEmptyID); err == nil {
+		t.Error("Expected error for empty peer ID, got nil")
+	}
+
+	// Empty Host
+	pEmptyHost := node.Peer{ID: "peer-1", Host: "", Port: 8001}
+	if err := n.AddPeer(pEmptyHost); err == nil {
+		t.Error("Expected error for empty peer Host, got nil")
+	}
+
+	// Port 0
+	pPortZero := node.Peer{ID: "peer-1", Host: "127.0.0.2", Port: 0}
+	if err := n.AddPeer(pPortZero); err == nil {
+		t.Error("Expected error for port 0, got nil")
+	}
+
+	// Negative Port
+	pPortNeg := node.Peer{ID: "peer-1", Host: "127.0.0.2", Port: -80}
+	if err := n.AddPeer(pPortNeg); err == nil {
+		t.Error("Expected error for negative port, got nil")
+	}
+
+	// Too large Port
+	pPortLarge := node.Peer{ID: "peer-1", Host: "127.0.0.2", Port: 65536}
+	if err := n.AddPeer(pPortLarge); err == nil {
+		t.Error("Expected error for port > 65535, got nil")
+	}
+}
+
+func TestRemovePeer(t *testing.T) {
+	n := node.NewNode("node-self", "127.0.0.1", 8000, nil)
+	p := node.Peer{ID: "peer-1", Host: "127.0.0.2", Port: 8001}
+	_ = n.AddPeer(p)
+
+	// Remove existing peer
+	err := n.RemovePeer("peer-1")
+	if err != nil {
+		t.Fatalf("Expected RemovePeer to succeed, got: %v", err)
+	}
+
+	if len(n.GetPeers()) != 0 {
+		t.Error("Expected peers list to be empty after peer removal")
+	}
+
+	// Remove non-existing peer (should be handled cleanly)
+	err = n.RemovePeer("peer-does-not-exist")
+	if err != nil {
+		t.Errorf("Expected RemovePeer of non-existent key to handle cleanly (no error), got: %v", err)
+	}
+}
+
+func TestGetPeersImmutability(t *testing.T) {
+	n := node.NewNode("node-self", "127.0.0.1", 8000, nil)
+	p := node.Peer{ID: "peer-1", Host: "127.0.0.2", Port: 8001}
+	_ = n.AddPeer(p)
+
+	peers := n.GetPeers()
+	// Mutate retrieved peer slice and fields
+	peers[0].ID = "mutated-id"
+	peers[0].Host = "mutated-host"
+	peers[0].Port = 9999
+
+	// Verify internal state remains untouched
+	originalPeers := n.GetPeers()
+	if originalPeers[0].ID != "peer-1" || originalPeers[0].Host != "127.0.0.2" || originalPeers[0].Port != 8001 {
+		t.Error("GetPeers() did not return a deep copy; internal state was mutated")
+	}
+}
+
+func TestMultiplePeersStoredAndRetrievedIndependently(t *testing.T) {
+	n := node.NewNode("node-self", "127.0.0.1", 8000, nil)
+	p1 := node.Peer{ID: "peer-1", Host: "127.0.0.2", Port: 8001}
+	p2 := node.Peer{ID: "peer-2", Host: "127.0.0.3", Port: 8002}
+	p3 := node.Peer{ID: "peer-3", Host: "127.0.0.4", Port: 8003}
+
+	_ = n.AddPeer(p1)
+	_ = n.AddPeer(p2)
+	_ = n.AddPeer(p3)
+
+	peers := n.GetPeers()
+	if len(peers) != 3 {
+		t.Fatalf("Expected exactly 3 peers, got %d", len(peers))
+	}
+
+	peerMap := make(map[string]node.Peer)
+	for _, p := range peers {
+		peerMap[p.ID] = p
+	}
+
+	for _, expected := range []node.Peer{p1, p2, p3} {
+		retrieved, exists := peerMap[expected.ID]
+		if !exists {
+			t.Errorf("Expected to find peer %s, but it was missing", expected.ID)
+		} else if retrieved.Host != expected.Host || retrieved.Port != expected.Port {
+			t.Errorf("Peer %s retrieved config does not match expected", expected.ID)
+		}
+	}
+}
+
+func TestIndependentNodesMaintainIndependentPeers(t *testing.T) {
+	n1 := node.NewNode("node-1", "127.0.0.1", 8000, nil)
+	n2 := node.NewNode("node-2", "127.0.0.1", 8001, nil)
+
+	p := node.Peer{ID: "peer-shared", Host: "127.0.0.2", Port: 8002}
+	_ = n1.AddPeer(p)
+
+	if len(n2.GetPeers()) != 0 {
+		t.Error("Node 2 peer list should not be affected by changes to Node 1")
+	}
+}
+
+func TestConcurrentPeerOperationsNoRaces(t *testing.T) {
+	n := node.NewNode("node-self", "127.0.0.1", 8000, nil)
+	done := make(chan bool)
+
+	// Concurrent Add/Get/Remove
+	go func() {
+		for i := 0; i < 100; i++ {
+			p := node.Peer{ID: fmt.Sprintf("peer-%d", i), Host: "127.0.0.2", Port: 8000 + i}
+			_ = n.AddPeer(p)
+			_ = n.GetPeers()
+		}
+		done <- true
+	}()
+
+	go func() {
+		for i := 0; i < 100; i++ {
+			_ = n.RemovePeer(fmt.Sprintf("peer-%d", i))
+			_ = n.GetPeers()
+		}
+		done <- true
+	}()
+
+	<-done
+	<-done
 }
