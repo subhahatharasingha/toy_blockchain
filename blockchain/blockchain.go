@@ -1,6 +1,7 @@
 package blockchain
 
 import (
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"math"
@@ -10,6 +11,7 @@ import (
 	"toy-blockchain/ledger"
 	"toy-blockchain/transaction"
 	"toy-blockchain/utils"
+	"toy-blockchain/wallet"
 )
 
 // GenesisTimestamp is a fixed Unix timestamp to make the Genesis block completely deterministic.
@@ -68,16 +70,50 @@ func (bc *Blockchain) VerifyTransaction(tx transaction.Transaction) error {
 		return errors.New("sender and receiver cannot be the same account")
 	}
 
-	// Verify digital signature
+	// Validate transaction ID uniqueness
+	if tx.ID != "" {
+		for _, pTx := range bc.PendingTransactions {
+			if pTx.ID == tx.ID {
+				return errors.New("transaction already pending")
+			}
+		}
+		for _, b := range bc.Blocks {
+			for _, bTx := range b.Transactions {
+				if bTx.ID == tx.ID {
+					return errors.New("transaction already mined")
+				}
+			}
+		}
+	}
+
+	// Verify digital signature and ID
 	// System and faucet accounts are allowed without signatures
 	if tx.Sender != "system" && tx.Sender != "faucet" {
 		if tx.PublicKey == "" || tx.Signature == "" {
 			return errors.New("invalid transaction signature")
 		}
 
-		valid := tx.VerifySignature()
-		if !valid {
+		// Decode public key
+		pubKeyBytes, err := base64.StdEncoding.DecodeString(tx.PublicKey)
+		if err != nil || len(pubKeyBytes) != 32 {
 			return errors.New("invalid transaction signature")
+		}
+
+		// Decode signature
+		sigBytes, err := base64.StdEncoding.DecodeString(tx.Signature)
+		if err != nil || len(sigBytes) != 64 {
+			return errors.New("invalid transaction signature")
+		}
+
+		// Verify signature bytes against signing payload
+		signingBytes, err := tx.SigningBytes()
+		if err != nil || !wallet.Verify(pubKeyBytes, signingBytes, sigBytes) {
+			return errors.New("invalid transaction signature")
+		}
+
+		// If signature is mathematically valid, then check if ID is correct
+		if tx.ID == "" || !tx.VerifyID() {
+			return errors.New("invalid transaction ID")
 		}
 	}
 
@@ -107,6 +143,12 @@ func (bc *Blockchain) VerifyTransaction(tx transaction.Transaction) error {
 
 // AddTransaction adds a transaction to the pending transaction pool after validating it.
 func (bc *Blockchain) AddTransaction(tx transaction.Transaction) error {
+	if tx.ID == "" {
+		id, err := tx.CalculateID()
+		if err == nil {
+			tx.ID = id
+		}
+	}
 	if err := bc.VerifyTransaction(tx); err != nil {
 		return err
 	}
@@ -156,13 +198,81 @@ func (bc *Blockchain) CreatePendingBlock(maxTx int) (block.Block, error) {
 func (bc *Blockchain) AddMinedBlock(b block.Block) {
 	bc.Blocks = append(bc.Blocks, b)
 
-	// Remove the mined transactions from the pending pool
-	numMined := len(b.Transactions)
-	if numMined >= len(bc.PendingTransactions) {
-		bc.PendingTransactions = []transaction.Transaction{}
-	} else {
-		bc.PendingTransactions = bc.PendingTransactions[numMined:]
+	// Remove the mined transactions from the pending pool by matching ID
+	minedIDs := make(map[string]struct{})
+	for _, tx := range b.Transactions {
+		minedIDs[tx.ID] = struct{}{}
 	}
+
+	newPending := make([]transaction.Transaction, 0, len(bc.PendingTransactions))
+	for _, tx := range bc.PendingTransactions {
+		if _, mined := minedIDs[tx.ID]; !mined {
+			newPending = append(newPending, tx)
+		}
+	}
+	bc.PendingTransactions = newPending
+}
+
+// VerifyBlock checks if a single block is valid to be appended to the current chain.
+func (bc *Blockchain) VerifyBlock(b block.Block) error {
+	latest := bc.GetLatestBlock()
+
+	// 1. Check index sequentiality
+	if b.Index != latest.Index+1 {
+		return fmt.Errorf("block index %d is out of sequence, expected %d", b.Index, latest.Index+1)
+	}
+
+	// 2. Previous hash link must match
+	if b.PreviousHash != latest.Hash {
+		return fmt.Errorf("previous hash mismatch: block stores previous hash '%s', but latest block has hash '%s'", b.PreviousHash, latest.Hash)
+	}
+
+	// 3. Check difficulty adjustment sequence
+	expectedDifficulty := CalculateNextDifficulty(bc.Blocks)
+	if b.Difficulty != expectedDifficulty {
+		return fmt.Errorf("invalid difficulty adjustment: expected %d, got %d", expectedDifficulty, b.Difficulty)
+	}
+
+	// 4. Stored hash must match recalculated hash
+	recalculatedHash := utils.CalculateHash(b)
+	if b.Hash != recalculatedHash {
+		return fmt.Errorf("block hash mismatch: block stores hash '%s', but recalculated hash is '%s'", b.Hash, recalculatedHash)
+	}
+
+	// 5. Proof of work must be valid
+	blockTarget := strings.Repeat("0", b.Difficulty)
+	if len(b.Hash) < b.Difficulty || b.Hash[:b.Difficulty] != blockTarget {
+		return fmt.Errorf("block hash '%s' does not satisfy difficulty target %d", b.Hash, b.Difficulty)
+	}
+
+	// 6. Check timestamp consistency (chronological order)
+	if b.Timestamp < latest.Timestamp {
+		return fmt.Errorf("block timestamp %d is earlier than latest block timestamp %d", b.Timestamp, latest.Timestamp)
+	}
+
+	// 7. Check merkle root
+	calculatedMerkleRoot := utils.CalculateMerkleRoot(b.Transactions)
+	if b.MerkleRoot != calculatedMerkleRoot {
+		return fmt.Errorf("invalid merkle root")
+	}
+
+	// 8. Verify transaction signatures across all block transactions (skip faucet/system)
+	for _, tx := range b.Transactions {
+		if tx.Sender == "faucet" || tx.Sender == "system" {
+			continue
+		}
+		if tx.ID == "" || !tx.VerifyID() {
+			return fmt.Errorf("invalid transaction ID")
+		}
+		if tx.PublicKey == "" || tx.Signature == "" {
+			return fmt.Errorf("missing signature fields for transaction")
+		}
+		if !tx.VerifySignature() {
+			return fmt.Errorf("invalid transaction signature")
+		}
+	}
+
+	return nil
 }
 
 // PrintChain prints details of every block in the chain to the console.

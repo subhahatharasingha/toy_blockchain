@@ -171,3 +171,12 @@ func (tx Transaction) VerifySignature() bool {
 
 	return tx.ID == expectedID
 }
+
+// VerifyID checks if the transaction ID matches the calculated hash of the transaction contents.
+func (tx Transaction) VerifyID() bool {
+	expectedID, err := tx.CalculateID()
+	if err != nil {
+		return false
+	}
+	return tx.ID == expectedID
+}

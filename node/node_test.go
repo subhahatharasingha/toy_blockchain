@@ -1,6 +1,7 @@
 package node_test
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -10,7 +11,10 @@ import (
 	"time"
 
 	"toy-blockchain/blockchain"
+	toy_mining "toy-blockchain/mining"
 	"toy-blockchain/node"
+	"toy-blockchain/transaction"
+	"toy-blockchain/wallet"
 )
 
 func TestNewNode(t *testing.T) {
@@ -540,7 +544,6 @@ func TestNodeIntrospectionAPI(t *testing.T) {
 }
 
 func TestConcurrentIntrospectionAPI(t *testing.T) {
-	// 14. Concurrent requests to /node and /peers are safe.
 	n := node.NewNode("concurrency-node", "127.0.0.1", 0, nil)
 	_ = n.AddPeer(node.Peer{ID: "peer-1", Host: "127.0.0.2", Port: 8001})
 
@@ -579,3 +582,314 @@ func TestConcurrentIntrospectionAPI(t *testing.T) {
 		<-done
 	}
 }
+
+func TestTransactionDuplicatePrevention(t *testing.T) {
+	nodeA := node.NewNode("node-a", "127.0.0.1", 0, nil)
+	nodeB := node.NewNode("node-b", "127.0.0.1", 0, nil)
+
+	_ = nodeA.StartServer()
+	_ = nodeB.StartServer()
+	defer func() {
+		_ = nodeA.Shutdown(context.Background())
+		_ = nodeB.Shutdown(context.Background())
+	}()
+
+	_ = nodeA.AddPeer(node.Peer{ID: nodeB.ID, Host: nodeB.Host, Port: nodeB.Port})
+	_ = nodeB.AddPeer(node.Peer{ID: nodeA.ID, Host: nodeA.Host, Port: nodeA.Port})
+
+	// Seed Node A and B's blockchain with balance for sender
+	aliceWallet, _ := wallet.NewWallet()
+	bobWallet, _ := wallet.NewWallet()
+
+	faucetTx := transaction.Transaction{Sender: "faucet", Receiver: aliceWallet.Address, Amount: 100.0}
+	
+	_ = nodeA.AddTransaction(faucetTx)
+	_ = nodeB.AddTransaction(faucetTx)
+
+	mineBlockOnNode(nodeA)
+	mineBlockOnNode(nodeB)
+
+	// Create valid signed transaction
+	tx, err := transaction.NewSignedTransaction(aliceWallet, bobWallet.Address, 10.0)
+	if err != nil {
+		t.Fatalf("Failed to create signed transaction: %v", err)
+	}
+
+	// Submit to Node A
+	client := &http.Client{Timeout: 1 * time.Second}
+	data, _ := json.Marshal(tx)
+	resp, err := client.Post(fmt.Sprintf("http://127.0.0.1:%d/transactions", nodeA.Port), "application/json", bytes.NewBuffer(data))
+	if err != nil {
+		t.Fatalf("Post to node A failed: %v", err)
+	}
+	_ = resp.Body.Close()
+
+	// Wait for gossip to complete
+	err = waitForCondition(func() bool {
+		return len(nodeB.GetPendingTransactions()) == 1
+	}, 2*time.Second)
+	if err != nil {
+		t.Fatalf("Node B did not receive gossiped transaction: %v", err)
+	}
+
+	// Verify Node B has the transaction
+	nodeBPending := nodeB.GetPendingTransactions()
+	if len(nodeBPending) != 1 || nodeBPending[0].ID != tx.ID {
+		t.Errorf("Node B pending transaction ID mismatch: expected %s, got %v", tx.ID, nodeBPending)
+	}
+
+	// Send same transaction to Node B again
+	resp2, err := client.Post(fmt.Sprintf("http://127.0.0.1:%d/transactions", nodeB.Port), "application/json", bytes.NewBuffer(data))
+	if err != nil {
+		t.Fatalf("Post duplicate to node B failed: %v", err)
+	}
+	_ = resp2.Body.Close()
+
+	// Wait a moment and confirm pending pool does not increase
+	time.Sleep(100 * time.Millisecond)
+	if len(nodeB.GetPendingTransactions()) != 1 {
+		t.Errorf("Node B pending transactions pool increased on duplicate transaction; expected 1, got %d", len(nodeB.GetPendingTransactions()))
+	}
+}
+
+func TestMultiNodeTransactionGossip(t *testing.T) {
+	nodeA := node.NewNode("node-a", "127.0.0.1", 0, nil)
+	nodeB := node.NewNode("node-b", "127.0.0.1", 0, nil)
+	nodeC := node.NewNode("node-c", "127.0.0.1", 0, nil)
+
+	_ = nodeA.StartServer()
+	_ = nodeB.StartServer()
+	_ = nodeC.StartServer()
+	defer func() {
+		_ = nodeA.Shutdown(context.Background())
+		_ = nodeB.Shutdown(context.Background())
+		_ = nodeC.Shutdown(context.Background())
+	}()
+
+	_ = nodeA.AddPeer(node.Peer{ID: nodeB.ID, Host: nodeB.Host, Port: nodeB.Port})
+	_ = nodeA.AddPeer(node.Peer{ID: nodeC.ID, Host: nodeC.Host, Port: nodeC.Port})
+	_ = nodeB.AddPeer(node.Peer{ID: nodeA.ID, Host: nodeA.Host, Port: nodeA.Port})
+	_ = nodeB.AddPeer(node.Peer{ID: nodeC.ID, Host: nodeC.Host, Port: nodeC.Port})
+	_ = nodeC.AddPeer(node.Peer{ID: nodeA.ID, Host: nodeA.Host, Port: nodeA.Port})
+	_ = nodeC.AddPeer(node.Peer{ID: nodeB.ID, Host: nodeB.Host, Port: nodeB.Port})
+
+	// Seed faucet balance on all nodes
+	aliceWallet, _ := wallet.NewWallet()
+	bobWallet, _ := wallet.NewWallet()
+
+	faucetTx := transaction.Transaction{Sender: "faucet", Receiver: aliceWallet.Address, Amount: 100.0}
+	
+	_ = nodeA.AddTransaction(faucetTx)
+	_ = nodeB.AddTransaction(faucetTx)
+	_ = nodeC.AddTransaction(faucetTx)
+
+	mineBlockOnNode(nodeA)
+	mineBlockOnNode(nodeB)
+	mineBlockOnNode(nodeC)
+
+	// Create valid signed transaction
+	tx, err := transaction.NewSignedTransaction(aliceWallet, bobWallet.Address, 10.0)
+	if err != nil {
+		t.Fatalf("Failed to create signed transaction: %v", err)
+	}
+
+	// Submit to Node A
+	client := &http.Client{Timeout: 1 * time.Second}
+	data, _ := json.Marshal(tx)
+	resp, err := client.Post(fmt.Sprintf("http://127.0.0.1:%d/transactions", nodeA.Port), "application/json", bytes.NewBuffer(data))
+	if err != nil {
+		t.Fatalf("Post to node A failed: %v", err)
+	}
+	_ = resp.Body.Close()
+
+	// Wait for transaction to reach B and C
+	err = waitForCondition(func() bool {
+		return len(nodeB.GetPendingTransactions()) == 1 && len(nodeC.GetPendingTransactions()) == 1
+	}, 3*time.Second)
+	if err != nil {
+		t.Fatalf("Transaction did not reach all nodes B and C: %v", err)
+	}
+
+	// Verify each node has exactly 1 copy of the transaction
+	for _, n := range []*node.Node{nodeA, nodeB, nodeC} {
+		pending := n.GetPendingTransactions()
+		if len(pending) != 1 {
+			t.Errorf("Node %s has invalid pending transaction count: %d", n.ID, len(pending))
+		} else if pending[0].ID != tx.ID {
+			t.Errorf("Node %s has mismatch transaction ID", n.ID)
+		}
+	}
+}
+
+func TestBlockGossip(t *testing.T) {
+	nodeA := node.NewNode("node-a", "127.0.0.1", 0, nil)
+	nodeB := node.NewNode("node-b", "127.0.0.1", 0, nil)
+
+	_ = nodeA.StartServer()
+	_ = nodeB.StartServer()
+	defer func() {
+		_ = nodeA.Shutdown(context.Background())
+		_ = nodeB.Shutdown(context.Background())
+	}()
+
+	_ = nodeA.AddPeer(node.Peer{ID: nodeB.ID, Host: nodeB.Host, Port: nodeB.Port})
+
+	// Seed faucet balance on all nodes
+	aliceWallet, _ := wallet.NewWallet()
+	bobWallet, _ := wallet.NewWallet()
+
+	faucetTx := transaction.Transaction{Sender: "faucet", Receiver: aliceWallet.Address, Amount: 100.0}
+	
+	_ = nodeA.AddTransaction(faucetTx)
+	_ = nodeB.AddTransaction(faucetTx)
+
+	mineBlockOnNode(nodeA)
+	mineBlockOnNode(nodeB)
+
+	// Create and add valid transaction on A
+	tx, _ := transaction.NewSignedTransaction(aliceWallet, bobWallet.Address, 10.0)
+	
+	_ = nodeA.AddTransaction(tx)
+	
+	// Mine a block on Node A
+	blockData, _ := nodeA.CreatePendingBlock(10)
+	
+	blockData.Timestamp = time.Now().Unix()
+	toy_mining.MineBlock(&blockData, blockData.Difficulty)
+
+	// Accept and Gossip it from Node A
+	nodeA.AddMinedBlockAndGossip(blockData)
+
+	// Verify Node B receives it
+	err := waitForCondition(func() bool {
+		return len(nodeB.GetBlocks()) == 3
+	}, 3*time.Second)
+	if err != nil {
+		t.Fatalf("Node B did not receive the block: %v", err)
+	}
+
+	// Verify same block received again does not create a duplicate
+	client := &http.Client{Timeout: 1 * time.Second}
+	data, _ := json.Marshal(blockData)
+	resp, _ := client.Post(fmt.Sprintf("http://127.0.0.1:%d/blocks", nodeB.Port), "application/json", bytes.NewBuffer(data))
+	if resp != nil {
+		_ = resp.Body.Close()
+	}
+	time.Sleep(100 * time.Millisecond)
+	if len(nodeB.GetBlocks()) != 3 {
+		t.Errorf("Node B created duplicate block; expected 3, got %d", len(nodeB.GetBlocks()))
+	}
+}
+
+func TestInvalidDataRejection(t *testing.T) {
+	n := node.NewNode("test-node", "127.0.0.1", 0, nil)
+	_ = n.StartServer()
+	defer func() { _ = n.Shutdown(context.Background()) }()
+
+	client := &http.Client{Timeout: 1 * time.Second}
+
+	// 1. Malformed JSON to POST /transactions
+	resp, _ := client.Post(fmt.Sprintf("http://127.0.0.1:%d/transactions", n.Port), "application/json", bytes.NewBuffer([]byte("{invalid json")))
+	if resp != nil {
+		_ = resp.Body.Close()
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Errorf("Expected 400 Bad Request for malformed JSON, got %d", resp.StatusCode)
+		}
+	}
+
+	// 2. Invalid transaction ID
+	aliceWallet, _ := wallet.NewWallet()
+	bobWallet, _ := wallet.NewWallet()
+	tx, _ := transaction.NewSignedTransaction(aliceWallet, bobWallet.Address, 10.0)
+	tx.ID = "invalid-hash-id"
+	data, _ := json.Marshal(tx)
+	resp, _ = client.Post(fmt.Sprintf("http://127.0.0.1:%d/transactions", n.Port), "application/json", bytes.NewBuffer(data))
+	if resp != nil {
+		_ = resp.Body.Close()
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Errorf("Expected 400 Bad Request for invalid ID, got %d", resp.StatusCode)
+		}
+	}
+
+	// 3. Malformed JSON to POST /blocks
+	resp, _ = client.Post(fmt.Sprintf("http://127.0.0.1:%d/blocks", n.Port), "application/json", bytes.NewBuffer([]byte("{invalid json")))
+	if resp != nil {
+		_ = resp.Body.Close()
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Errorf("Expected 400 Bad Request for malformed JSON block, got %d", resp.StatusCode)
+		}
+	}
+}
+
+func TestPeerFailureGossip(t *testing.T) {
+	nodeA := node.NewNode("node-a", "127.0.0.1", 0, nil)
+	nodeC := node.NewNode("node-c", "127.0.0.1", 0, nil)
+
+	_ = nodeA.StartServer()
+	_ = nodeC.StartServer()
+	defer func() {
+		_ = nodeA.Shutdown(context.Background())
+		_ = nodeC.Shutdown(context.Background())
+	}()
+
+	// Node B is offline (unavailable)
+	peerB := node.Peer{ID: "node-b", Host: "127.0.0.1", Port: 54321}
+	peerC := node.Peer{ID: nodeC.ID, Host: nodeC.Host, Port: nodeC.Port}
+
+	_ = nodeA.AddPeer(peerB)
+	_ = nodeA.AddPeer(peerC)
+
+	// Seed faucet on A and C
+	aliceWallet, _ := wallet.NewWallet()
+	bobWallet, _ := wallet.NewWallet()
+	faucetTx := transaction.Transaction{Sender: "faucet", Receiver: aliceWallet.Address, Amount: 100.0}
+	
+	_ = nodeA.AddTransaction(faucetTx)
+	_ = nodeC.AddTransaction(faucetTx)
+
+	mineBlockOnNode(nodeA)
+	mineBlockOnNode(nodeC)
+
+	// Submit transaction to A
+	tx, _ := transaction.NewSignedTransaction(aliceWallet, bobWallet.Address, 10.0)
+	client := &http.Client{Timeout: 1 * time.Second}
+	data, _ := json.Marshal(tx)
+	resp, err := client.Post(fmt.Sprintf("http://127.0.0.1:%d/transactions", nodeA.Port), "application/json", bytes.NewBuffer(data))
+	if err != nil {
+		t.Fatalf("Post failed: %v", err)
+	}
+	_ = resp.Body.Close()
+
+	// Verify Node C receives it despite Node B being offline
+	err = waitForCondition(func() bool {
+		return len(nodeC.GetPendingTransactions()) == 1
+	}, 3*time.Second)
+	if err != nil {
+		t.Errorf("Node C did not receive gossiped transaction when B was offline: %v", err)
+	}
+
+	// Node A must remain operational
+	if !nodeA.IsServerRunning() {
+		t.Error("Node A server stopped running or crashed")
+	}
+}
+
+// Helpers for tests
+func mineBlockOnNode(n *node.Node) {
+	blockData, _ := n.CreatePendingBlock(10)
+	blockData.Timestamp = time.Now().Unix()
+	toy_mining.MineBlock(&blockData, blockData.Difficulty)
+	n.AddMinedBlock(blockData)
+}
+
+func waitForCondition(cond func() bool, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if cond() {
+			return nil
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	return fmt.Errorf("condition not met within timeout")
+}
+

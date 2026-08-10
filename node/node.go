@@ -1,14 +1,18 @@
 package node
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"net"
 	"net/http"
 	"sync"
+	"time"
 
+	"toy-blockchain/block"
 	"toy-blockchain/blockchain"
+	"toy-blockchain/transaction"
 )
 
 // Peer represents a configuration of another node in the network.
@@ -30,6 +34,11 @@ type Node struct {
 
 	peers   map[string]Peer
 	peersMu sync.RWMutex // guards peers map
+
+	seenTxs      map[string]struct{}
+	seenTxsMu    sync.RWMutex // guards seenTxs map
+	seenBlocks   map[string]struct{}
+	seenBlocksMu sync.RWMutex // guards seenBlocks map
 }
 
 // NewNode creates and initializes a new Node.
@@ -44,6 +53,8 @@ func NewNode(id string, host string, port int, bc *blockchain.Blockchain) *Node 
 		Port:       port,
 		Blockchain: bc,
 		peers:      make(map[string]Peer),
+		seenTxs:    make(map[string]struct{}),
+		seenBlocks: make(map[string]struct{}),
 	}
 }
 
@@ -73,6 +84,8 @@ func (n *Node) StartServer() error {
 	mux.HandleFunc("/", n.handleHealth)
 	mux.HandleFunc("/node", n.handleNodeInfo)
 	mux.HandleFunc("/peers", n.handlePeers)
+	mux.HandleFunc("/transactions", n.handlePostTransaction)
+	mux.HandleFunc("/blocks", n.handlePostBlock)
 
 	server := &http.Server{
 		Addr:    fmt.Sprintf("%s:%d", n.Host, n.Port),
@@ -167,6 +180,18 @@ func (n *Node) GetPeers() []Peer {
 	return peersList
 }
 
+// AddMinedBlockAndGossip appends a mined block to the node's local blockchain and gossips it to peers.
+func (n *Node) AddMinedBlockAndGossip(b block.Block) {
+	n.mu.Lock()
+	n.Blockchain.AddMinedBlock(b)
+	n.seenBlocksMu.Lock()
+	n.seenBlocks[b.Hash] = struct{}{}
+	n.seenBlocksMu.Unlock()
+	n.mu.Unlock()
+
+	n.gossipBlock(b)
+}
+
 // handleHealth responds to health checks.
 func (n *Node) handleHealth(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
@@ -223,3 +248,208 @@ func (n *Node) handlePeers(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 	_ = json.NewEncoder(w).Encode(resp)
 }
+
+// handlePostTransaction receives a transaction and processes it for gossip.
+func (n *Node) handlePostTransaction(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var tx transaction.Transaction
+	err := json.NewDecoder(r.Body).Decode(&tx)
+	if err != nil {
+		http.Error(w, "Malformed JSON", http.StatusBadRequest)
+		return
+	}
+
+	if tx.ID == "" || !tx.VerifyID() {
+		http.Error(w, "Invalid transaction ID", http.StatusBadRequest)
+		return
+	}
+
+	// De-duplication: check if already seen
+	n.seenTxsMu.Lock()
+	if _, seen := n.seenTxs[tx.ID]; seen {
+		n.seenTxsMu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"status":"success","message":"Duplicate transaction ignored"}`))
+		return
+	}
+	n.seenTxs[tx.ID] = struct{}{}
+	n.seenTxsMu.Unlock()
+
+	n.mu.Lock()
+	err = n.Blockchain.AddTransaction(tx)
+	n.mu.Unlock()
+
+	if err != nil {
+		// Clean up seen trace so it can be resubmitted if corrected
+		n.seenTxsMu.Lock()
+		delete(n.seenTxs, tx.ID)
+		n.seenTxsMu.Unlock()
+
+		http.Error(w, fmt.Sprintf("Invalid transaction: %v", err), http.StatusBadRequest)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusCreated)
+	_, _ = w.Write([]byte(`{"status":"success","message":"Transaction accepted"}`))
+
+	go n.gossipTransaction(tx)
+}
+
+// handlePostBlock receives a block and processes it for gossip.
+func (n *Node) handlePostBlock(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var b block.Block
+	err := json.NewDecoder(r.Body).Decode(&b)
+	if err != nil {
+		http.Error(w, "Malformed JSON", http.StatusBadRequest)
+		return
+	}
+
+	// De-duplication: check if already seen
+	n.seenBlocksMu.Lock()
+	if _, seen := n.seenBlocks[b.Hash]; seen {
+		n.seenBlocksMu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"status":"success","message":"Duplicate block ignored"}`))
+		return
+	}
+	n.seenBlocks[b.Hash] = struct{}{}
+	n.seenBlocksMu.Unlock()
+
+	n.mu.Lock()
+	err = n.Blockchain.VerifyBlock(b)
+	if err == nil {
+		n.Blockchain.AddMinedBlock(b)
+	}
+	n.mu.Unlock()
+
+	if err != nil {
+		// Clean up seen trace
+		n.seenBlocksMu.Lock()
+		delete(n.seenBlocks, b.Hash)
+		n.seenBlocksMu.Unlock()
+
+		http.Error(w, fmt.Sprintf("Invalid block: %v", err), http.StatusBadRequest)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusCreated)
+	_, _ = w.Write([]byte(`{"status":"success","message":"Block accepted"}`))
+
+	go n.gossipBlock(b)
+}
+
+func (n *Node) gossipTransaction(tx transaction.Transaction) {
+	peers := n.GetPeers()
+	if len(peers) == 0 {
+		return
+	}
+
+	data, err := json.Marshal(tx)
+	if err != nil {
+		return
+	}
+
+	client := &http.Client{Timeout: 2 * time.Second}
+
+	for _, p := range peers {
+		go func(peer Peer) {
+			url := fmt.Sprintf("http://%s:%d/transactions", peer.Host, peer.Port)
+			req, err := http.NewRequest(http.MethodPost, url, bytes.NewBuffer(data))
+			if err != nil {
+				return
+			}
+			req.Header.Set("Content-Type", "application/json")
+
+			resp, err := client.Do(req)
+			if err != nil {
+				return
+			}
+			_ = resp.Body.Close()
+		}(p)
+	}
+}
+
+func (n *Node) gossipBlock(b block.Block) {
+	peers := n.GetPeers()
+	if len(peers) == 0 {
+		return
+	}
+
+	data, err := json.Marshal(b)
+	if err != nil {
+		return
+	}
+
+	client := &http.Client{Timeout: 2 * time.Second}
+
+	for _, p := range peers {
+		go func(peer Peer) {
+			url := fmt.Sprintf("http://%s:%d/blocks", peer.Host, peer.Port)
+			req, err := http.NewRequest(http.MethodPost, url, bytes.NewBuffer(data))
+			if err != nil {
+				return
+			}
+			req.Header.Set("Content-Type", "application/json")
+
+			resp, err := client.Do(req)
+			if err != nil {
+				return
+			}
+			_ = resp.Body.Close()
+		}(p)
+	}
+}
+
+// GetPendingTransactions returns a copy of the pending transactions in a thread-safe manner.
+func (n *Node) GetPendingTransactions() []transaction.Transaction {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	txs := make([]transaction.Transaction, len(n.Blockchain.PendingTransactions))
+	copy(txs, n.Blockchain.PendingTransactions)
+	return txs
+}
+
+// GetBlocks returns a copy of the blocks in a thread-safe manner.
+func (n *Node) GetBlocks() []block.Block {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	blocks := make([]block.Block, len(n.Blockchain.Blocks))
+	copy(blocks, n.Blockchain.Blocks)
+	return blocks
+}
+
+// AddTransaction adds a transaction to the node's blockchain in a thread-safe manner.
+func (n *Node) AddTransaction(tx transaction.Transaction) error {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	return n.Blockchain.AddTransaction(tx)
+}
+
+// CreatePendingBlock creates a block with pending transactions in a thread-safe manner.
+func (n *Node) CreatePendingBlock(maxTx int) (block.Block, error) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	return n.Blockchain.CreatePendingBlock(maxTx)
+}
+
+// AddMinedBlock adds a mined block in a thread-safe manner.
+func (n *Node) AddMinedBlock(b block.Block) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	n.Blockchain.AddMinedBlock(b)
+}
+
+
