@@ -11,7 +11,6 @@ import (
 	"toy-blockchain/mining"
 	"toy-blockchain/storage"
 	"toy-blockchain/transaction"
-	"toy-blockchain/utils"
 )
 
 var (
@@ -105,19 +104,8 @@ func addTransaction(bc *blockchain.Blockchain, args []string) {
 	}
 
 	if sender != "system" && sender != "faucet" {
-		privateKey, publicKey, err := utils.GenerateKeyPair()
-		if err != nil {
-			fmt.Printf("Error generating key pair: %v\n", err)
-			return
-		}
-		data := sender + receiver + fmt.Sprintf("%f", amount)
-		signature, err := utils.SignTransaction(data, privateKey)
-		if err != nil {
-			fmt.Printf("Error signing transaction: %v\n", err)
-			return
-		}
-		tx.PublicKey = publicKey
-		tx.Signature = signature
+		fmt.Println("Error: normal-user transactions cannot yet be signed via CLI (no persistent wallet support).")
+		return
 	}
 
 	// AddTransaction performs verification internally
