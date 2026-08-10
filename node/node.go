@@ -2,6 +2,7 @@ package node
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net"
 	"net/http"
@@ -70,6 +71,8 @@ func (n *Node) StartServer() error {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", n.handleHealth)
 	mux.HandleFunc("/", n.handleHealth)
+	mux.HandleFunc("/node", n.handleNodeInfo)
+	mux.HandleFunc("/peers", n.handlePeers)
 
 	server := &http.Server{
 		Addr:    fmt.Sprintf("%s:%d", n.Host, n.Port),
@@ -173,4 +176,50 @@ func (n *Node) handleHealth(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write([]byte(`{"status":"OK"}`))
+}
+
+type nodeInfoResponse struct {
+	ID   string `json:"id"`
+	Host string `json:"host"`
+	Port int    `json:"port"`
+}
+
+type peersResponse struct {
+	Peers []Peer `json:"peers"`
+}
+
+// handleNodeInfo returns node configuration as JSON.
+func (n *Node) handleNodeInfo(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	n.mu.Lock()
+	resp := nodeInfoResponse{
+		ID:   n.ID,
+		Host: n.Host,
+		Port: n.Port,
+	}
+	n.mu.Unlock()
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(resp)
+}
+
+// handlePeers returns current node peers as JSON.
+func (n *Node) handlePeers(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	resp := peersResponse{
+		Peers: n.GetPeers(),
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(resp)
 }

@@ -409,3 +409,173 @@ func TestConcurrentPeerOperationsNoRaces(t *testing.T) {
 	<-done
 	<-done
 }
+
+func TestNodeIntrospectionAPI(t *testing.T) {
+	n := node.NewNode("introspection-node", "127.0.0.1", 0, nil)
+
+	err := n.StartServer()
+	if err != nil {
+		t.Fatalf("Failed to start HTTP server: %v", err)
+	}
+	defer func() {
+		_ = n.Shutdown(context.Background())
+	}()
+
+	client := &http.Client{Timeout: 1 * time.Second}
+	urlNode := fmt.Sprintf("http://%s:%d/node", n.Host, n.Port)
+	urlPeers := fmt.Sprintf("http://%s:%d/peers", n.Host, n.Port)
+	urlHealth := fmt.Sprintf("http://%s:%d/health", n.Host, n.Port)
+	urlRoot := fmt.Sprintf("http://%s:%d/", n.Host, n.Port)
+
+	// 1, 2, 3. Test GET /node
+	respNode, err := client.Get(urlNode)
+	if err != nil {
+		t.Fatalf("Failed GET /node: %v", err)
+	}
+	if respNode.StatusCode != http.StatusOK {
+		t.Errorf("Expected status 200 for GET /node, got %d", respNode.StatusCode)
+	}
+	if respNode.Header.Get("Content-Type") != "application/json" {
+		t.Errorf("Expected Content-Type application/json, got %s", respNode.Header.Get("Content-Type"))
+	}
+	var nodeInfo struct {
+		ID   string `json:"id"`
+		Host string `json:"host"`
+		Port int    `json:"port"`
+	}
+	bodyNode, _ := io.ReadAll(respNode.Body)
+	_ = respNode.Body.Close()
+	if err := json.Unmarshal(bodyNode, &nodeInfo); err != nil {
+		t.Fatalf("Failed parsing GET /node JSON: %v", err)
+	}
+	if nodeInfo.ID != n.ID || nodeInfo.Host != n.Host || nodeInfo.Port != n.Port {
+		t.Errorf("GET /node configuration mismatch: expected ID %s, Host %s, Port %d; got ID %s, Host %s, Port %d",
+			n.ID, n.Host, n.Port, nodeInfo.ID, nodeInfo.Host, nodeInfo.Port)
+	}
+
+	// 4, 5, 6. Test GET /peers initially empty
+	respPeers, err := client.Get(urlPeers)
+	if err != nil {
+		t.Fatalf("Failed GET /peers: %v", err)
+	}
+	if respPeers.StatusCode != http.StatusOK {
+		t.Errorf("Expected status 200 for GET /peers, got %d", respPeers.StatusCode)
+	}
+	var peersData struct {
+		Peers []node.Peer `json:"peers"`
+	}
+	bodyPeers, _ := io.ReadAll(respPeers.Body)
+	_ = respPeers.Body.Close()
+	if err := json.Unmarshal(bodyPeers, &peersData); err != nil {
+		t.Fatalf("Failed parsing GET /peers JSON: %v", err)
+	}
+	if len(peersData.Peers) != 0 {
+		t.Errorf("Expected initially empty peer list, got %v", peersData.Peers)
+	}
+
+	// 7, 8. Test GET /peers after adding peers
+	p1 := node.Peer{ID: "peer-1", Host: "127.0.0.2", Port: 8001}
+	p2 := node.Peer{ID: "peer-2", Host: "127.0.0.3", Port: 8002}
+	_ = n.AddPeer(p1)
+	_ = n.AddPeer(p2)
+
+	respPeers2, err := client.Get(urlPeers)
+	if err != nil {
+		t.Fatalf("Failed GET /peers: %v", err)
+	}
+	bodyPeers2, _ := io.ReadAll(respPeers2.Body)
+	_ = respPeers2.Body.Close()
+	if err := json.Unmarshal(bodyPeers2, &peersData); err != nil {
+		t.Fatalf("Failed parsing GET /peers JSON: %v", err)
+	}
+	if len(peersData.Peers) != 2 {
+		t.Fatalf("Expected 2 peers, got %d", len(peersData.Peers))
+	}
+
+	peerMap := make(map[string]node.Peer)
+	for _, p := range peersData.Peers {
+		peerMap[p.ID] = p
+	}
+	for _, expected := range []node.Peer{p1, p2} {
+		retrieved, ok := peerMap[expected.ID]
+		if !ok {
+			t.Errorf("Expected peer %s not found in GET /peers response", expected.ID)
+		} else if retrieved.Host != expected.Host || retrieved.Port != expected.Port {
+			t.Errorf("Config mismatch for peer %s: expected %s:%d, got %s:%d",
+				expected.ID, expected.Host, expected.Port, retrieved.Host, retrieved.Port)
+		}
+	}
+
+	// 11. Test POST /node is rejected
+	respPostNode, err := client.Post(urlNode, "application/json", nil)
+	if err != nil {
+		t.Fatalf("POST /node request failed: %v", err)
+	}
+	_ = respPostNode.Body.Close()
+	if respPostNode.StatusCode != http.StatusMethodNotAllowed {
+		t.Errorf("Expected 405 Method Not Allowed for POST /node, got %d", respPostNode.StatusCode)
+	}
+
+	// 12. Test POST /peers is rejected
+	respPostPeers, err := client.Post(urlPeers, "application/json", nil)
+	if err != nil {
+		t.Fatalf("POST /peers request failed: %v", err)
+	}
+	_ = respPostPeers.Body.Close()
+	if respPostPeers.StatusCode != http.StatusMethodNotAllowed {
+		t.Errorf("Expected 405 Method Not Allowed for POST /peers, got %d", respPostPeers.StatusCode)
+	}
+
+	// 9 & 10. Health and / still work
+	for _, url := range []string{urlHealth, urlRoot} {
+		resp, err := client.Get(url)
+		if err != nil {
+			t.Fatalf("GET request failed to %s: %v", url, err)
+		}
+		_ = resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Errorf("Expected GET to %s to return 200, got %d", url, resp.StatusCode)
+		}
+	}
+}
+
+func TestConcurrentIntrospectionAPI(t *testing.T) {
+	// 14. Concurrent requests to /node and /peers are safe.
+	n := node.NewNode("concurrency-node", "127.0.0.1", 0, nil)
+	_ = n.AddPeer(node.Peer{ID: "peer-1", Host: "127.0.0.2", Port: 8001})
+
+	err := n.StartServer()
+	if err != nil {
+		t.Fatalf("Failed to start HTTP server: %v", err)
+	}
+	defer func() {
+		_ = n.Shutdown(context.Background())
+	}()
+
+	client := &http.Client{Timeout: 2 * time.Second}
+	urlNode := fmt.Sprintf("http://%s:%d/node", n.Host, n.Port)
+	urlPeers := fmt.Sprintf("http://%s:%d/peers", n.Host, n.Port)
+
+	done := make(chan bool)
+	workers := 5
+
+	for i := 0; i < workers; i++ {
+		go func() {
+			for j := 0; j < 50; j++ {
+				resp, err := client.Get(urlNode)
+				if err == nil {
+					_ = resp.Body.Close()
+				}
+				resp2, err := client.Get(urlPeers)
+				if err == nil {
+					_ = resp2.Body.Close()
+				}
+			}
+			done <- true
+		}()
+	}
+
+	for i := 0; i < workers; i++ {
+		<-done
+	}
+}
