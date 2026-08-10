@@ -151,6 +151,15 @@ func TestBlockchainTamperDetection(t *testing.T) {
 	})
 }
 
+func containsTx(pool []transaction.Transaction, tx transaction.Transaction) bool {
+	for _, pTx := range pool {
+		if pTx.ID == tx.ID {
+			return true
+		}
+	}
+	return false
+}
+
 func TestTransactionRejection(t *testing.T) {
 	bc := blockchain.NewBlockchain()
 
@@ -178,46 +187,95 @@ func TestTransactionRejection(t *testing.T) {
 	mining.MineBlock(&block1, block1.Difficulty)
 	bc.AddMinedBlock(block1)
 
+	// Verify pending pool is empty after mining
+	if len(bc.PendingTransactions) != 0 {
+		t.Fatalf("Expected empty pending transactions pool, got %d", len(bc.PendingTransactions))
+	}
+
+	// Helper to check pool state after a rejection
+	checkRejection := func(name string, tx transaction.Transaction, expectedErr string) {
+		err := bc.AddTransaction(tx)
+		if err == nil {
+			t.Errorf("[%s] Expected rejection, but transaction was accepted", name)
+		} else if expectedErr != "" && !strings.Contains(err.Error(), expectedErr) {
+			t.Errorf("[%s] Expected error containing '%s', got '%v'", name, expectedErr, err)
+		}
+		if containsTx(bc.PendingTransactions, tx) {
+			t.Errorf("[%s] Rejected transaction was found in pending pool", name)
+		}
+	}
+
 	// 1. Try to send negative amount
 	txNeg, _ := transaction.NewSignedTransaction(aliceWallet, bobWallet.Address, -5.0)
-	err = bc.AddTransaction(txNeg)
-	if err == nil {
-		t.Error("Expected rejection for negative transaction amount, but transaction was accepted")
-	}
+	checkRejection("Negative Amount", txNeg, "invalid transaction amount")
 
 	// 2. Try to send zero amount
 	txZero, _ := transaction.NewSignedTransaction(aliceWallet, bobWallet.Address, 0.0)
-	err = bc.AddTransaction(txZero)
-	if err == nil {
-		t.Error("Expected rejection for zero transaction amount, but transaction was accepted")
-	}
+	checkRejection("Zero Amount", txZero, "invalid transaction amount")
 
 	// 3. Try to overspend immediately (60 coins when balance is 50)
 	txOver, _ := transaction.NewSignedTransaction(aliceWallet, bobWallet.Address, 60.0)
-	err = bc.AddTransaction(txOver)
-	if err == nil {
-		t.Error("Expected rejection for overspending, but transaction was accepted")
-	}
+	checkRejection("Overspending", txOver, "insufficient balance")
 
-	// 4. Try to spend valid amount (30 coins)
+	// 4. Try same sender and receiver
+	txSameSenderRecv, _ := transaction.NewSignedTransaction(aliceWallet, aliceWallet.Address, 5.0)
+	checkRejection("Same Sender and Receiver", txSameSenderRecv, "sender and receiver cannot be the same account")
+
+	// 5. Try missing public key
+	txMissingPubKey, _ := transaction.NewSignedTransaction(aliceWallet, bobWallet.Address, 5.0)
+	txMissingPubKey.PublicKey = ""
+	checkRejection("Missing Public Key", txMissingPubKey, "invalid transaction signature")
+
+	// 6. Try missing signature
+	txMissingSig, _ := transaction.NewSignedTransaction(aliceWallet, bobWallet.Address, 5.0)
+	txMissingSig.Signature = ""
+	checkRejection("Missing Signature", txMissingSig, "invalid transaction signature")
+
+	// 7. Try invalid signature (wrong length/format)
+	txInvalidSigStr, _ := transaction.NewSignedTransaction(aliceWallet, bobWallet.Address, 10.0)
+	txInvalidSigStr.Signature = base64.StdEncoding.EncodeToString([]byte("invalid_sig_value_length_64_bytes_padding_mismatch_invalid_verification_value"))
+	checkRejection("Invalid Signature (Wrong Length)", txInvalidSigStr, "invalid transaction signature")
+
+	// 8. Try invalid signature (correct length but tampered bytes)
+	txInvalidSigTampered, _ := transaction.NewSignedTransaction(aliceWallet, bobWallet.Address, 10.0)
+	sigBytes, _ := base64.StdEncoding.DecodeString(txInvalidSigTampered.Signature)
+	if len(sigBytes) > 0 {
+		sigBytes[0] ^= 0xFF
+	}
+	txInvalidSigTampered.Signature = base64.StdEncoding.EncodeToString(sigBytes)
+	checkRejection("Invalid Signature (Tampered Bytes)", txInvalidSigTampered, "invalid transaction signature")
+
+	// 9. Try transaction modified after signing (tampered amount)
+	txModifiedAmount, _ := transaction.NewSignedTransaction(aliceWallet, bobWallet.Address, 10.0)
+	txModifiedAmount.Amount = 20.0
+	checkRejection("Modified Amount After Signing", txModifiedAmount, "invalid transaction signature")
+
+	// 10. Try transaction modified after signing (tampered receiver)
+	txModifiedReceiver, _ := transaction.NewSignedTransaction(aliceWallet, bobWallet.Address, 10.0)
+	charlieWallet, _ := wallet.NewWallet()
+	txModifiedReceiver.Receiver = charlieWallet.Address
+	checkRejection("Modified Receiver After Signing", txModifiedReceiver, "invalid transaction signature")
+
+	// 11. Try to spend valid amount (30 coins)
 	txValid1, _ := transaction.NewSignedTransaction(aliceWallet, bobWallet.Address, 30.0)
 	err = bc.AddTransaction(txValid1)
 	if err != nil {
 		t.Fatalf("Valid transaction failed to add: %v", err)
 	}
-
-	// 5. Try to spend another 30 coins while the first 30 is still pending (should fail due to pending spent tracking)
-	txValid2, _ := transaction.NewSignedTransaction(aliceWallet, bobWallet.Address, 30.0)
-	err = bc.AddTransaction(txValid2)
-	if err == nil {
-		t.Error("Expected rejection for cumulative overspending in pending pool, but transaction was accepted")
+	if !containsTx(bc.PendingTransactions, txValid1) {
+		t.Fatal("Valid transaction was not added to the pending transactions pool")
+	}
+	if len(bc.PendingTransactions) != 1 {
+		t.Fatalf("Expected exactly 1 pending transaction, got %d", len(bc.PendingTransactions))
 	}
 
-	// 6. Try to spend with a tampered/invalid signature
-	txInvalidSig, _ := transaction.NewSignedTransaction(aliceWallet, bobWallet.Address, 10.0)
-	txInvalidSig.Signature = base64.StdEncoding.EncodeToString([]byte("invalid_sig_value_length_64_bytes_padding_mismatch_invalid_verification_value"))
-	err = bc.AddTransaction(txInvalidSig)
-	if err == nil {
-		t.Error("Expected rejection for invalid signature, but transaction was accepted")
+	// 12. Try to spend another 30 coins while the first 30 is still pending (should fail due to pending spent tracking)
+	time.Sleep(10 * time.Millisecond)
+	txValid2, _ := transaction.NewSignedTransaction(aliceWallet, bobWallet.Address, 30.0)
+	checkRejection("Cumulative Overspending", txValid2, "insufficient balance")
+
+	// Final check: pending transactions should only contain txValid1
+	if len(bc.PendingTransactions) != 1 || bc.PendingTransactions[0].ID != txValid1.ID {
+		t.Error("Pending transactions pool was corrupted by rejected transactions")
 	}
 }
