@@ -86,6 +86,8 @@ func (n *Node) StartServer() error {
 	mux.HandleFunc("/peers", n.handlePeers)
 	mux.HandleFunc("/transactions", n.handlePostTransaction)
 	mux.HandleFunc("/blocks", n.handlePostBlock)
+	mux.HandleFunc("/chain", n.handleGetChain)
+	mux.HandleFunc("/sync", n.handlePostSync)
 
 	server := &http.Server{
 		Addr:    fmt.Sprintf("%s:%d", n.Host, n.Port),
@@ -340,6 +342,9 @@ func (n *Node) handlePostBlock(w http.ResponseWriter, r *http.Request) {
 		delete(n.seenBlocks, b.Hash)
 		n.seenBlocksMu.Unlock()
 
+		// Trigger synchronization if block is out-of-order or points to an alternative branch/fork
+		go n.SyncWithPeers()
+
 		http.Error(w, fmt.Sprintf("Invalid block: %v", err), http.StatusBadRequest)
 		return
 	}
@@ -413,6 +418,134 @@ func (n *Node) gossipBlock(b block.Block) {
 	}
 }
 
+// handleGetChain returns the node's current chain blocks as JSON.
+func (n *Node) handleGetChain(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	chain := n.GetBlocks()
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(chain)
+}
+
+type syncRequest struct {
+	ID   string `json:"id"`
+	Host string `json:"host"`
+	Port int    `json:"port"`
+}
+
+// handlePostSync requests synchronization with either a specific peer or all peers.
+func (n *Node) handlePostSync(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req syncRequest
+	err := json.NewDecoder(r.Body).Decode(&req)
+	if err != nil || req.Host == "" || req.Port <= 0 {
+		// No peer specified or invalid parameters, trigger sync on all configured peers
+		go n.SyncWithPeers()
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"status":"success","message":"Sync triggered with all configured peers"}`))
+		return
+	}
+
+	targetPeer := Peer{
+		ID:   req.ID,
+		Host: req.Host,
+		Port: req.Port,
+	}
+
+	go func() {
+		_ = n.SyncWithPeer(targetPeer)
+	}()
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write([]byte(`{"status":"success","message":"Sync triggered with peer"}`))
+}
+
+// SyncWithPeers contacts all configured peers to synchronize blockchain states.
+func (n *Node) SyncWithPeers() {
+	peers := n.GetPeers()
+	for _, p := range peers {
+		go func(peer Peer) {
+			_ = n.SyncWithPeer(peer)
+		}(p)
+	}
+}
+
+// SyncWithPeer synchronizes blockchain blocks with a single peer.
+// Locks are NOT held while performing the network HTTP request to prevent blocking and deadlock scenarios.
+func (n *Node) SyncWithPeer(p Peer) error {
+	client := &http.Client{Timeout: 3 * time.Second}
+	url := fmt.Sprintf("http://%s:%d/chain", p.Host, p.Port)
+
+	resp, err := client.Get(url)
+	if err != nil {
+		return fmt.Errorf("failed to fetch chain from peer %s: %w", p.ID, err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("peer %s returned non-200 code: %d", p.ID, resp.StatusCode)
+	}
+
+	var peerBlocks []block.Block
+	err = json.NewDecoder(resp.Body).Decode(&peerBlocks)
+	if err != nil {
+		return fmt.Errorf("failed to decode chain from peer %s: %w", p.ID, err)
+	}
+
+	// Lock the Node state to perform validation, comparison, and potential reorganization
+	n.mu.Lock()
+	defer n.mu.Unlock()
+
+	// 1. Verify and check if the peer's chain is preferred over ours
+	if !blockchain.IsPreferredChain(peerBlocks, n.Blockchain.Blocks) {
+		return fmt.Errorf("peer %s chain is not preferred or invalid", p.ID)
+	}
+
+	// 2. Perform reorganization and restore orphaned transactions to mempool
+	err = n.Blockchain.Reorganize(peerBlocks)
+	if err != nil {
+		return fmt.Errorf("failed to reorganize local blockchain with peer %s chain: %w", p.ID, err)
+	}
+
+	// 3. Update seen-block cache
+	n.seenBlocksMu.Lock()
+	n.seenBlocks = make(map[string]struct{})
+	for _, b := range n.Blockchain.Blocks {
+		n.seenBlocks[b.Hash] = struct{}{}
+	}
+	n.seenBlocksMu.Unlock()
+
+	// 4. Update seen-transaction cache
+	n.seenTxsMu.Lock()
+	n.seenTxs = make(map[string]struct{})
+	for _, b := range n.Blockchain.Blocks {
+		for _, tx := range b.Transactions {
+			if tx.ID != "" {
+				n.seenTxs[tx.ID] = struct{}{}
+			}
+		}
+	}
+	for _, tx := range n.Blockchain.PendingTransactions {
+		if tx.ID != "" {
+			n.seenTxs[tx.ID] = struct{}{}
+		}
+	}
+	n.seenTxsMu.Unlock()
+
+	return nil
+}
+
 // GetPendingTransactions returns a copy of the pending transactions in a thread-safe manner.
 func (n *Node) GetPendingTransactions() []transaction.Transaction {
 	n.mu.Lock()
@@ -451,5 +584,3 @@ func (n *Node) AddMinedBlock(b block.Block) {
 	defer n.mu.Unlock()
 	n.Blockchain.AddMinedBlock(b)
 }
-
-
