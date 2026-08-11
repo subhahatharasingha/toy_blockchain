@@ -2,8 +2,10 @@ package blockchain
 
 import (
 	"fmt"
+	"math"
 	"strings"
 	"toy-blockchain/block"
+	"toy-blockchain/ledger"
 	"toy-blockchain/transaction"
 	"toy-blockchain/utils"
 )
@@ -223,6 +225,11 @@ func ValidateChain(chain []block.Block) bool {
 		if current.Timestamp < previous.Timestamp {
 			return false
 		}
+
+		// 5.5. Verify ledger state and balances
+		if err := ValidateBlockLedgerState(current, chain[:i]); err != nil {
+			return false
+		}
 	}
 
 	// 6. Verify transaction signatures and IDs across all blocks
@@ -231,9 +238,6 @@ func ValidateChain(chain []block.Block) bool {
 		for _, tx := range current.Transactions {
 			if tx.ID != "" && !tx.VerifyID() {
 				return false
-			}
-			if tx.Sender == "faucet" || tx.Sender == "system" {
-				continue
 			}
 			if tx.PublicKey == "" || tx.Signature == "" {
 				return false
@@ -245,4 +249,32 @@ func ValidateChain(chain []block.Block) bool {
 	}
 
 	return true
+}
+
+// ValidateBlockLedgerState verifies transaction amounts and that senders have
+// sufficient balance in block `b` given a preceding chain block list.
+func ValidateBlockLedgerState(b block.Block, preceding []block.Block) error {
+	l := ledger.NewLedger()
+	for _, pb := range preceding {
+		for _, tx := range pb.Transactions {
+			l.ApplyTransaction(tx.Sender, tx.Receiver, tx.Amount)
+		}
+	}
+
+	for _, tx := range b.Transactions {
+		if tx.Amount <= 0 || math.IsNaN(tx.Amount) || math.IsInf(tx.Amount, 0) {
+			return fmt.Errorf("invalid transaction amount")
+		}
+		if tx.Sender == tx.Receiver {
+			return fmt.Errorf("sender and receiver cannot be the same")
+		}
+		if tx.Sender != "system" && tx.Sender != "faucet" {
+			balance := l.GetBalance(tx.Sender)
+			if balance < tx.Amount {
+				return fmt.Errorf("insufficient balance: sender %s has %f, trying to send %f", tx.Sender, balance, tx.Amount)
+			}
+		}
+		l.ApplyTransaction(tx.Sender, tx.Receiver, tx.Amount)
+	}
+	return nil
 }

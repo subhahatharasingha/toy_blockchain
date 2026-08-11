@@ -1,16 +1,23 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
+	"net"
 	"os"
+	"os/signal"
 	"strconv"
+	"strings"
+	"syscall"
 	"time"
 
 	"toy-blockchain/blockchain"
 	"toy-blockchain/mining"
+	"toy-blockchain/node"
 	"toy-blockchain/storage"
 	"toy-blockchain/transaction"
+	"toy-blockchain/wallet"
 )
 
 var (
@@ -26,6 +33,7 @@ func printUsage() {
 	fmt.Println("\nFlags:")
 	flag.PrintDefaults()
 	fmt.Println("\nCommands:")
+	fmt.Println("  node --id <id> --host <host> --port <port> - Start a networked blockchain node")
 	fmt.Println("  addtx <sender> <receiver> <amount> - Add a new pending transaction")
 	fmt.Println("  mine                               - Mine a block with pending transactions")
 	fmt.Println("  print                              - Print the full blockchain details")
@@ -45,6 +53,12 @@ func main() {
 		return
 	}
 
+	command := args[0]
+	if command == "node" {
+		runNode(args)
+		return
+	}
+
 	// Load the blockchain from disk at the configured path
 	bc, err := storage.Load(*fileFlag)
 	if err != nil {
@@ -52,7 +66,6 @@ func main() {
 		os.Exit(1)
 	}
 
-	command := args[0]
 	switch command {
 	case "addtx":
 		addTransaction(bc, args)
@@ -97,14 +110,20 @@ func addTransaction(bc *blockchain.Blockchain, args []string) {
 		return
 	}
 
-	tx := transaction.Transaction{
-		Sender:   sender,
-		Receiver: receiver,
-		Amount:   amount,
-	}
-
 	if sender != "system" && sender != "faucet" {
 		fmt.Println("Error: normal-user transactions cannot yet be signed via CLI (no persistent wallet support).")
+		return
+	}
+
+	var tx transaction.Transaction
+	if sender == "faucet" {
+		tx, err = transaction.NewSignedSpecialTransaction("faucet", wallet.FaucetPrivateKey, wallet.FaucetPublicKey, receiver, amount)
+	} else {
+		tx, err = transaction.NewSignedSpecialTransaction("system", wallet.SystemPrivateKey, wallet.SystemPublicKey, receiver, amount)
+	}
+
+	if err != nil {
+		fmt.Printf("Failed to sign transaction: %v\n", err)
 		return
 	}
 
@@ -198,4 +217,133 @@ func resolveForks(bc *blockchain.Blockchain) {
 	} else {
 		fmt.Println("No longer valid fork found.")
 	}
+}
+
+func runNode(args []string) {
+	nodeCmd := flag.NewFlagSet("node", flag.ContinueOnError)
+	idFlag := nodeCmd.String("id", "", "Node ID")
+	hostFlag := nodeCmd.String("host", "", "Node Host")
+	portFlag := nodeCmd.Int("port", 0, "Node Port")
+	fileFlagSub := nodeCmd.String("file", "", "Path to the blockchain database file")
+	peersFlag := nodeCmd.String("peers", "", "Comma-separated list of peer URLs")
+
+	if err := nodeCmd.Parse(args[1:]); err != nil {
+		os.Exit(1)
+	}
+
+	id := *idFlag
+	host := *hostFlag
+	port := *portFlag
+	dbPath := *fileFlagSub
+
+	if id == "" {
+		fmt.Fprintln(os.Stderr, "Error: Node ID cannot be empty.")
+		os.Exit(1)
+	}
+	if host == "" {
+		fmt.Fprintln(os.Stderr, "Error: Node host cannot be empty.")
+		os.Exit(1)
+	}
+	if port <= 0 || port > 65535 {
+		fmt.Fprintf(os.Stderr, "Error: Invalid port number: %d. Must be between 1 and 65535.\n", port)
+		os.Exit(1)
+	}
+
+	// Support persistence loading
+	var bc *blockchain.Blockchain
+	if dbPath != "" {
+		var err error
+		bc, err = storage.Load(dbPath)
+		if err != nil {
+			fmt.Printf("Database file '%s' not found or corrupt, creating new blockchain: %v\n", dbPath, err)
+			bc = blockchain.NewBlockchain()
+			// Create directory if not exists
+			dir := dbPath
+			if lastIdx := strings.LastIndex(dbPath, "/"); lastIdx != -1 {
+				dir = dbPath[:lastIdx]
+			} else if lastIdx := strings.LastIndex(dbPath, "\\"); lastIdx != -1 {
+				dir = dbPath[:lastIdx]
+			}
+			if dir != dbPath {
+				_ = os.MkdirAll(dir, 0755)
+			}
+			_ = storage.Save(bc, dbPath)
+		}
+	} else {
+		bc = blockchain.NewBlockchain()
+	}
+
+	n := node.NewNode(id, host, port, bc)
+	n.DbPath = dbPath
+
+	// Parse peers list
+	if *peersFlag != "" {
+		peerList := strings.Split(*peersFlag, ",")
+		for _, rawPeer := range peerList {
+			rawPeer = strings.TrimSpace(rawPeer)
+			if rawPeer == "" {
+				continue
+			}
+
+			cleanPeer := rawPeer
+			cleanPeer = strings.TrimPrefix(cleanPeer, "http://")
+			cleanPeer = strings.TrimPrefix(cleanPeer, "https://")
+
+			peerHost, peerPortStr, err := net.SplitHostPort(cleanPeer)
+			if err != nil {
+				parts := strings.Split(cleanPeer, ":")
+				if len(parts) == 2 {
+					peerHost = parts[0]
+					peerPortStr = parts[1]
+				} else {
+					fmt.Fprintf(os.Stderr, "Warning: invalid peer address format '%s': %v\n", rawPeer, err)
+					continue
+				}
+			}
+
+			var peerPort int
+			_, err = fmt.Sscanf(peerPortStr, "%d", &peerPort)
+			if err != nil || peerPort <= 0 || peerPort > 65535 {
+				fmt.Fprintf(os.Stderr, "Warning: invalid peer port '%s'\n", peerPortStr)
+				continue
+			}
+
+			placeholderID := fmt.Sprintf("peer-%s-%d", peerHost, peerPort)
+			err = n.AddPeer(node.Peer{
+				ID:   placeholderID,
+				Host: peerHost,
+				Port: peerPort,
+			})
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Warning: failed to add peer '%s': %v\n", rawPeer, err)
+			}
+		}
+	}
+
+	if err := n.StartServer(); err != nil {
+		fmt.Fprintf(os.Stderr, "Error starting node server: %v\n", err)
+		os.Exit(1)
+	}
+
+	fmt.Printf("Node ID:          %s\n", n.ID)
+	fmt.Printf("Host:             %s\n", n.Host)
+	fmt.Printf("Port:             %d\n", n.Port)
+	fmt.Printf("Health Endpoint:  http://%s:%d/health\n", n.Host, n.Port)
+	fmt.Printf("Chain Endpoint:   http://%s:%d/chain\n", n.Host, n.Port)
+	fmt.Println("Node is running. Press Ctrl+C to terminate.")
+
+	stop := make(chan os.Signal, 1)
+	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
+
+	<-stop
+
+	fmt.Println("\nShutting down node server...")
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	if err := n.Shutdown(ctx); err != nil {
+		fmt.Fprintf(os.Stderr, "Error shutting down node server: %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Println("Node server stopped.")
 }

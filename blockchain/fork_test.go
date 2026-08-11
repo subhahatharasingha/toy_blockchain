@@ -38,7 +38,7 @@ func TestValidLongerForkReplacement(t *testing.T) {
 	eve, _ := wallet.NewWallet()
 
 	// 1. Build main chain of length 3
-	txs1 := []transaction.Transaction{{Sender: "faucet", Receiver: alice.Address, Amount: 10.0}}
+	txs1 := []transaction.Transaction{faucetTx(alice.Address, 10.0)}
 	b1_main := mineNextBlockForTest(t, []block.Block{genesis}, txs1)
 
 	txAliceBob, err := transaction.NewSignedTransaction(alice, bob.Address, 5.0)
@@ -52,7 +52,7 @@ func TestValidLongerForkReplacement(t *testing.T) {
 	bc.Blocks = mainChain
 
 	// 2. Build competing fork chain of length 5 starting from genesis
-	txs1_fork := []transaction.Transaction{{Sender: "faucet", Receiver: charlie.Address, Amount: 20.0}}
+	txs1_fork := []transaction.Transaction{faucetTx(charlie.Address, 20.0)}
 	b1_fork := mineNextBlockForTest(t, []block.Block{genesis}, txs1_fork)
 
 	txCharlieDavid, err := transaction.NewSignedTransaction(charlie, david.Address, 10.0)
@@ -110,7 +110,7 @@ func TestInvalidForkRejected(t *testing.T) {
 	eve, _ := wallet.NewWallet()
 
 	// 1. Build main chain of length 3
-	txs1 := []transaction.Transaction{{Sender: "faucet", Receiver: alice.Address, Amount: 10.0}}
+	txs1 := []transaction.Transaction{faucetTx(alice.Address, 10.0)}
 	b1_main := mineNextBlockForTest(t, []block.Block{genesis}, txs1)
 
 	txAliceBob, err := transaction.NewSignedTransaction(alice, bob.Address, 5.0)
@@ -124,7 +124,7 @@ func TestInvalidForkRejected(t *testing.T) {
 	bc.Blocks = mainChain
 
 	// 2. Build invalid competing fork chain of length 5 starting from genesis
-	txs1_fork := []transaction.Transaction{{Sender: "faucet", Receiver: charlie.Address, Amount: 20.0}}
+	txs1_fork := []transaction.Transaction{faucetTx(charlie.Address, 20.0)}
 	b1_fork := mineNextBlockForTest(t, []block.Block{genesis}, txs1_fork)
 
 	txCharlieDavid, err := transaction.NewSignedTransaction(charlie, david.Address, 10.0)
@@ -182,7 +182,7 @@ func TestShorterForkIgnored(t *testing.T) {
 	frank, _ := wallet.NewWallet()
 
 	// 1. Build main chain of length 5
-	txs1 := []transaction.Transaction{{Sender: "faucet", Receiver: alice.Address, Amount: 10.0}}
+	txs1 := []transaction.Transaction{faucetTx(alice.Address, 10.0)}
 	b1_main := mineNextBlockForTest(t, []block.Block{genesis}, txs1)
 
 	txAliceBob, err := transaction.NewSignedTransaction(alice, bob.Address, 5.0)
@@ -210,7 +210,7 @@ func TestShorterForkIgnored(t *testing.T) {
 	bc.Blocks = mainChain
 
 	// 2. Build competing fork chain of length 3 starting from genesis
-	txs1_fork := []transaction.Transaction{{Sender: "faucet", Receiver: eve.Address, Amount: 20.0}}
+	txs1_fork := []transaction.Transaction{faucetTx(eve.Address, 20.0)}
 	b1_fork := mineNextBlockForTest(t, []block.Block{genesis}, txs1_fork)
 
 	txEveFrank, err := transaction.NewSignedTransaction(eve, frank.Address, 10.0)

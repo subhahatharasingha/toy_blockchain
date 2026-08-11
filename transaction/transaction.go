@@ -1,12 +1,14 @@
 package transaction
 
 import (
+	"bytes"
 	"crypto/ed25519"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"sync/atomic"
 	"time"
 
 	"toy-blockchain/wallet"
@@ -141,9 +143,19 @@ func (tx Transaction) VerifySignature() bool {
 
 	publicKey := ed25519.PublicKey(publicKeyBytes)
 
-	expectedAddress := wallet.AddressFromPublicKey(publicKey)
-	if expectedAddress != tx.Sender {
-		return false
+	if tx.Sender == "faucet" {
+		if len(wallet.FaucetPublicKey) == 0 || !bytes.Equal(publicKeyBytes, wallet.FaucetPublicKey) {
+			return false
+		}
+	} else if tx.Sender == "system" {
+		if len(wallet.SystemPublicKey) == 0 || !bytes.Equal(publicKeyBytes, wallet.SystemPublicKey) {
+			return false
+		}
+	} else {
+		expectedAddress := wallet.AddressFromPublicKey(publicKey)
+		if expectedAddress != tx.Sender {
+			return false
+		}
 	}
 
 	signatureBytes, err := base64.StdEncoding.DecodeString(tx.Signature)
@@ -179,4 +191,45 @@ func (tx Transaction) VerifyID() bool {
 		return false
 	}
 	return tx.ID == expectedID
+}
+
+var specialTxCounter int64
+
+// NewSignedSpecialTransaction creates and signs a transaction for a special sender ("faucet" or "system").
+func NewSignedSpecialTransaction(
+	sender string,
+	privateKey ed25519.PrivateKey,
+	publicKey ed25519.PublicKey,
+	receiver string,
+	amount float64,
+) (Transaction, error) {
+	if len(privateKey) != ed25519.PrivateKeySize {
+		return Transaction{}, errors.New("invalid private key size")
+	}
+
+	pubKeyBase64 := base64.StdEncoding.EncodeToString(publicKey)
+
+	tx := Transaction{
+		Sender:    sender,
+		Receiver:  receiver,
+		Amount:    amount,
+		Timestamp: time.Now().UnixNano() + atomic.AddInt64(&specialTxCounter, 1),
+		PublicKey: pubKeyBase64,
+	}
+
+	signingBytes, err := tx.SigningBytes()
+	if err != nil {
+		return Transaction{}, err
+	}
+
+	signature := ed25519.Sign(privateKey, signingBytes)
+	tx.Signature = base64.StdEncoding.EncodeToString(signature)
+
+	id, err := tx.CalculateID()
+	if err != nil {
+		return Transaction{}, err
+	}
+	tx.ID = id
+
+	return tx, nil
 }

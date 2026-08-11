@@ -12,16 +12,20 @@ import (
 	"toy-blockchain/wallet"
 )
 
+func faucetTx(receiver string, amount float64) transaction.Transaction {
+	tx, err := transaction.NewSignedSpecialTransaction("faucet", wallet.FaucetPrivateKey, wallet.FaucetPublicKey, receiver, amount)
+	if err != nil {
+		panic(err)
+	}
+	return tx
+}
+
 // setupTestBlockchain creates an honest chain of 3 blocks (genesis, block 1, block 2)
 func setupTestBlockchain(t *testing.T, difficulty int, aliceWallet, bobWallet *wallet.Wallet) *blockchain.Blockchain {
 	bc := blockchain.NewBlockchain()
 
 	// Add faucet transaction and mine Block 1
-	err := bc.AddTransaction(transaction.Transaction{
-		Sender:   "faucet",
-		Receiver: aliceWallet.Address,
-		Amount:   100.0,
-	})
+	err := bc.AddTransaction(faucetTx(aliceWallet.Address, 100.0))
 	if err != nil {
 		t.Fatalf("Failed to add transaction from faucet: %v", err)
 	}
@@ -173,11 +177,7 @@ func TestTransactionRejection(t *testing.T) {
 	}
 
 	// Faucet seeds alice with 50 coins
-	err = bc.AddTransaction(transaction.Transaction{
-		Sender:   "faucet",
-		Receiver: aliceWallet.Address,
-		Amount:   50.0,
-	})
+	err = bc.AddTransaction(faucetTx(aliceWallet.Address, 50.0))
 	if err != nil {
 		t.Fatalf("Faucet seeding failed: %v", err)
 	}

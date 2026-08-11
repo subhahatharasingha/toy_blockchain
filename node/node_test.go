@@ -8,7 +8,6 @@ import (
 	"io"
 	"net/http"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -20,6 +19,14 @@ import (
 	"toy-blockchain/utils"
 	"toy-blockchain/wallet"
 )
+
+func faucetTx(receiver string, amount float64) transaction.Transaction {
+	tx, err := transaction.NewSignedSpecialTransaction("faucet", wallet.FaucetPrivateKey, wallet.FaucetPublicKey, receiver, amount)
+	if err != nil {
+		panic(err)
+	}
+	return tx
+}
 
 func TestNewNode(t *testing.T) {
 	id := "test-node-1"
@@ -270,7 +277,7 @@ func TestTransactionDuplicatePrevention(t *testing.T) {
 	aliceWallet, _ := wallet.NewWallet()
 	bobWallet, _ := wallet.NewWallet()
 
-	faucetTx := transaction.Transaction{Sender: "faucet", Receiver: aliceWallet.Address, Amount: 100.0}
+	faucetTx := faucetTx(aliceWallet.Address, 100.0)
 	_ = nodeA.AddTransaction(faucetTx)
 	_ = nodeB.AddTransaction(faucetTx)
 
@@ -432,7 +439,7 @@ func TestFindCommonAncestor(t *testing.T) {
 	bc := blockchain.NewBlockchain()
 	b1 := mineNextTestBlock(bc.Blocks[0])
 	b2a := mineNextTestBlock(b1)
-	
+
 	b2b := b1
 	b2b.Timestamp += 5
 	b2b = mineNextTestBlock(b2b)
@@ -453,7 +460,7 @@ func TestForkDetection(t *testing.T) {
 	bc := blockchain.NewBlockchain()
 	b1 := mineNextTestBlock(bc.Blocks[0])
 	b2a := mineNextTestBlock(b1)
-	
+
 	b2b := b1
 	b2b.Timestamp += 5
 	b2b = mineNextTestBlock(b2b)
@@ -518,7 +525,7 @@ func TestOrphanedTransactionRestoration(t *testing.T) {
 	alice, _ := wallet.NewWallet()
 	bob, _ := wallet.NewWallet()
 
-	faucetTx := transaction.Transaction{Sender: "faucet", Receiver: alice.Address, Amount: 100.0}
+	faucetTx := faucetTx(alice.Address, 100.0)
 	_ = nodeA.AddTransaction(faucetTx)
 	_ = nodeB.AddTransaction(faucetTx)
 	mineBlockOnNode(nodeA)
@@ -557,14 +564,14 @@ func TestDuplicateTransactionNotRestored(t *testing.T) {
 	alice, _ := wallet.NewWallet()
 	bob, _ := wallet.NewWallet()
 
-	faucetTx := transaction.Transaction{Sender: "faucet", Receiver: alice.Address, Amount: 100.0}
+	faucetTx := faucetTx(alice.Address, 100.0)
 	_ = nodeA.AddTransaction(faucetTx)
 	_ = nodeB.AddTransaction(faucetTx)
 	mineBlockOnNode(nodeA)
 	_ = nodeB.SyncWithPeer(node.Peer{ID: nodeA.ID, Host: nodeA.Host, Port: nodeA.Port})
 
 	t2, _ := transaction.NewSignedTransaction(alice, bob.Address, 10.0)
-	
+
 	_ = nodeA.AddTransaction(t2)
 	mineBlockOnNode(nodeA)
 
@@ -596,7 +603,7 @@ func TestMempoolConsistencyAfterReorganization(t *testing.T) {
 	alice, _ := wallet.NewWallet()
 	bob, _ := wallet.NewWallet()
 
-	faucetTx := transaction.Transaction{Sender: "faucet", Receiver: alice.Address, Amount: 100.0}
+	faucetTx := faucetTx(alice.Address, 100.0)
 	_ = nodeA.AddTransaction(faucetTx)
 	_ = nodeB.AddTransaction(faucetTx)
 	mineBlockOnNode(nodeA)
@@ -637,8 +644,8 @@ func TestBalanceAfterReorganization(t *testing.T) {
 
 	alice, _ := wallet.NewWallet()
 
-	faucetTxA := transaction.Transaction{Sender: "faucet", Receiver: alice.Address, Amount: 100.0}
-	faucetTxB := transaction.Transaction{Sender: "faucet", Receiver: alice.Address, Amount: 250.0}
+	faucetTxA := faucetTx(alice.Address, 100.0)
+	faucetTxB := faucetTx(alice.Address, 250.0)
 
 	_ = nodeA.AddTransaction(faucetTxA)
 	mineBlockOnNode(nodeA)
@@ -756,7 +763,7 @@ func TestMiningAfterReorganization(t *testing.T) {
 
 	alice, _ := wallet.NewWallet()
 
-	faucetTx := transaction.Transaction{Sender: "faucet", Receiver: alice.Address, Amount: 100.0}
+	faucetTx := faucetTx(alice.Address, 100.0)
 	_ = nodeB.AddTransaction(faucetTx)
 	mineBlockOnNode(nodeB)
 
@@ -831,9 +838,8 @@ func TestExistingTransactionGossipStillWorks(t *testing.T) {
 	_ = nodeA.AddPeer(node.Peer{ID: nodeB.ID, Host: nodeB.Host, Port: nodeB.Port})
 
 	alice, _ := wallet.NewWallet()
-	faucetTx := transaction.Transaction{Sender: "faucet", Receiver: alice.Address, Amount: 10.0}
-	faucetTx.ID, _ = faucetTx.CalculateID()
-	
+	faucetTx := faucetTx(alice.Address, 10.0)
+
 	client := &http.Client{Timeout: 1 * time.Second}
 	data, _ := json.Marshal(faucetTx)
 	resp, err := client.Post(fmt.Sprintf("http://127.0.0.1:%d/transactions", nodeA.Port), "application/json", bytes.NewBuffer(data))
@@ -885,7 +891,7 @@ func TestInvalidChainDoesNotModifyLocalState(t *testing.T) {
 	}()
 
 	alice, _ := wallet.NewWallet()
-	faucetTx := transaction.Transaction{Sender: "faucet", Receiver: alice.Address, Amount: 100.0}
+	faucetTx := faucetTx(alice.Address, 100.0)
 	_ = nodeA.AddTransaction(faucetTx)
 	mineBlockOnNode(nodeA)
 
@@ -978,8 +984,7 @@ func TestCumulativeDifficultyChainSelection(t *testing.T) {
 	nodeA.AddMinedBlock(bA10)
 
 	blocksD := nodeD.GetBlocks()
-	faucetTx := transaction.Transaction{Sender: "faucet", Receiver: "alice", Amount: 5.0}
-	faucetTx.ID, _ = faucetTx.CalculateID()
+	faucetTx := faucetTx("alice", 5.0)
 	_ = nodeD.AddTransaction(faucetTx)
 	bD10 := mineNextChainBlock(blocksD, blocksD[len(blocksD)-1].Timestamp+300)
 	nodeD.AddMinedBlock(bD10)
@@ -1003,7 +1008,7 @@ func TestConcurrentStressNode(t *testing.T) {
 	defer func() { _ = n.Shutdown(context.Background()) }()
 
 	alice, _ := wallet.NewWallet()
-	faucetTx := transaction.Transaction{Sender: "faucet", Receiver: alice.Address, Amount: 1000.0}
+	faucetTx := faucetTx(alice.Address, 1000.0)
 	_ = n.AddTransaction(faucetTx)
 	mineBlockOnNode(n)
 
@@ -1143,8 +1148,7 @@ func TestThreeNodeClusterIntegration(t *testing.T) {
 
 	// Seed faucet transaction to Node A, B, C to allow initial mining
 	alice, _ := wallet.NewWallet()
-	faucetTx := transaction.Transaction{Sender: "faucet", Receiver: alice.Address, Amount: 1000.0}
-	faucetTx.ID, _ = faucetTx.CalculateID()
+	faucetTx := faucetTx(alice.Address, 1000.0)
 
 	// Add faucet transaction to Node A and gossip it to B and C
 	client := &http.Client{Timeout: 1 * time.Second}
@@ -1218,7 +1222,6 @@ func TestThreeNodeClusterIntegration(t *testing.T) {
 	}
 	// Node C total blocks = 5, cumulative work = 4.
 
-
 	// Add a distinct signed transaction to Node C before it gets reorganized
 	bob, _ := wallet.NewWallet()
 	txC, _ := transaction.NewSignedTransaction(alice, bob.Address, 5.0)
@@ -1237,7 +1240,6 @@ func TestThreeNodeClusterIntegration(t *testing.T) {
 		t.Fatalf("Failed to restart Node B: %v", err)
 	}
 
-	
 	// Reconnect peers A ↔ B ↔ C ↔ A
 	peerA.Port = nodeA.Port
 	peerB.Port = nodeB.Port
@@ -1253,7 +1255,6 @@ func TestThreeNodeClusterIntegration(t *testing.T) {
 	// Trigger synchronization explicitly and synchronously
 	_ = nodeB.SyncWithPeer(peerA)
 	_ = nodeC.SyncWithPeer(peerA)
-
 
 	// 12-13. Verify preferred-chain selection (higher cumulative difficulty wins over length) and convergence
 	err = waitForCondition(func() bool {
@@ -1287,13 +1288,7 @@ func TestThreeNodeClusterIntegration(t *testing.T) {
 func mineBlockOnNode(n *node.Node) {
 	txs := n.GetPendingTransactions()
 	if len(txs) == 0 {
-		dummy := transaction.Transaction{
-			Sender:    "faucet",
-			Receiver:  "dummy",
-			Amount:    1.0,
-			Timestamp: time.Now().UnixNano() + atomic.AddInt64(&dummyCounter, 1),
-		}
-		dummy.ID, _ = dummy.CalculateID()
+		dummy := faucetTx("dummy", 1.0)
 		err := n.AddTransaction(dummy)
 		if err != nil {
 			panic(fmt.Sprintf("Failed to add dummy transaction: %v", err))
@@ -1349,4 +1344,182 @@ func waitForCondition(cond func() bool, timeout time.Duration) error {
 	}
 	return fmt.Errorf("condition not met within timeout")
 }
+
 var dummyCounter int64
+
+func TestFaucetAndTransactionSecurity(t *testing.T) {
+	bc := blockchain.NewBlockchain()
+	alice, _ := wallet.NewWallet()
+	bob, _ := wallet.NewWallet()
+
+	// 1. Unsigned normal transaction is rejected
+	txUnsignedNormal := transaction.Transaction{
+		Sender:   alice.Address,
+		Receiver: bob.Address,
+		Amount:   10.0,
+	}
+	txUnsignedNormal.ID, _ = txUnsignedNormal.CalculateID()
+	err := bc.AddTransaction(txUnsignedNormal)
+	if err == nil {
+		t.Error("Expected unsigned normal transaction to be rejected, got nil")
+	}
+
+	// 2. Unsigned faucet transaction is rejected
+	txUnsignedFaucet := transaction.Transaction{
+		Sender:   "faucet",
+		Receiver: alice.Address,
+		Amount:   100.0,
+	}
+	txUnsignedFaucet.ID, _ = txUnsignedFaucet.CalculateID()
+	err = bc.AddTransaction(txUnsignedFaucet)
+	if err == nil {
+		t.Error("Expected unsigned faucet transaction to be rejected, got nil")
+	}
+
+	// 3. Fake faucet public key/signature is rejected
+	// We create a transaction claiming to be faucet, but signed with Alice's key
+	txFakeFaucet, _ := transaction.NewSignedSpecialTransaction(
+		"faucet",
+		alice.PrivateKey,
+		alice.PublicKey,
+		bob.Address,
+		50.0,
+	)
+	err = bc.AddTransaction(txFakeFaucet)
+	if err == nil {
+		t.Error("Expected faucet transaction signed with Alice's key (fake public key) to be rejected, got nil")
+	}
+
+	// 4. Valid faucet signature is accepted
+	txValidFaucet := faucetTx(alice.Address, 100.0)
+	err = bc.AddTransaction(txValidFaucet)
+	if err != nil {
+		t.Errorf("Expected valid faucet transaction to be accepted, got: %v", err)
+	}
+
+	// 5. Modified faucet transaction is rejected
+	txModifiedFaucet := faucetTx(alice.Address, 100.0)
+	txModifiedFaucet.Amount = 200.0 // modify amount after signing
+	err = bc.AddTransaction(txModifiedFaucet)
+	if err == nil {
+		t.Error("Expected modified faucet transaction to be rejected, got nil")
+	}
+
+	// Mine the valid faucet transaction so Alice has 100 coins
+	blockData, _ := bc.CreatePendingBlock(10)
+	bc.AddMinedBlock(blockData)
+
+	// 6. Valid normal Ed25519 transaction is accepted
+	txValidNormal, _ := transaction.NewSignedTransaction(alice, bob.Address, 40.0)
+	err = bc.AddTransaction(txValidNormal)
+	if err != nil {
+		t.Errorf("Expected valid signed normal transaction to be accepted, got: %v", err)
+	}
+
+	// 7. Modified normal transaction is rejected
+	txModifiedNormal, _ := transaction.NewSignedTransaction(alice, bob.Address, 30.0)
+	txModifiedNormal.Amount = 50.0 // modify amount after signing
+	err = bc.AddTransaction(txModifiedNormal)
+	if err == nil {
+		t.Error("Expected modified normal transaction to be rejected, got nil")
+	}
+}
+
+func TestNetworkFaucetAndBlockSecurity(t *testing.T) {
+	nodeA := node.NewNode("node-a", "127.0.0.1", 0, nil)
+	nodeB := node.NewNode("node-b", "127.0.0.1", 0, nil)
+
+	_ = nodeA.StartServer()
+	_ = nodeB.StartServer()
+	defer func() {
+		_ = nodeA.Shutdown(context.Background())
+		_ = nodeB.Shutdown(context.Background())
+	}()
+
+	_ = nodeA.AddPeer(node.Peer{ID: nodeB.ID, Host: nodeB.Host, Port: nodeB.Port})
+	_ = nodeB.AddPeer(node.Peer{ID: nodeA.ID, Host: nodeA.Host, Port: nodeA.Port})
+
+	client := &http.Client{Timeout: 2 * time.Second}
+	alice, _ := wallet.NewWallet()
+
+	// 8. Invalid faucet transaction received through /transactions is rejected
+	txInvalidFaucet := transaction.Transaction{
+		Sender:   "faucet",
+		Receiver: alice.Address,
+		Amount:   1000.0,
+	}
+	txInvalidFaucet.ID, _ = txInvalidFaucet.CalculateID()
+	data, _ := json.Marshal(txInvalidFaucet)
+	resp, err := client.Post(fmt.Sprintf("http://127.0.0.1:%d/transactions", nodeA.Port), "application/json", bytes.NewBuffer(data))
+	if err != nil {
+		t.Fatalf("POST /transactions failed: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusCreated || resp.StatusCode == http.StatusOK {
+		t.Error("Expected POST /transactions with invalid faucet tx to be rejected, but it succeeded")
+	}
+
+	// 9. Invalid faucet transaction inside a received block is rejected
+	invalidBlock := block.Block{
+		Index:        1,
+		Timestamp:    time.Now().Unix(),
+		Transactions: []transaction.Transaction{txInvalidFaucet},
+		PreviousHash: nodeA.GetBlocks()[0].Hash,
+		Difficulty:   1,
+	}
+	invalidBlock.MerkleRoot = utils.CalculateMerkleRoot(invalidBlock.Transactions)
+	toy_mining.MineBlock(&invalidBlock, 1)
+
+	blockData, _ := json.Marshal(invalidBlock)
+	respBlock, err := client.Post(fmt.Sprintf("http://127.0.0.1:%d/blocks", nodeA.Port), "application/json", bytes.NewBuffer(blockData))
+	if err != nil {
+		t.Fatalf("POST /blocks failed: %v", err)
+	}
+	defer respBlock.Body.Close()
+	if respBlock.StatusCode == http.StatusCreated || respBlock.StatusCode == http.StatusOK {
+		t.Error("Expected block with invalid faucet transaction to be rejected, but it succeeded")
+	}
+
+	// 10. Valid faucet transaction propagates between nodes
+	validFaucetTx := faucetTx(alice.Address, 100.0)
+	validData, _ := json.Marshal(validFaucetTx)
+	respValid, err := client.Post(fmt.Sprintf("http://127.0.0.1:%d/transactions", nodeA.Port), "application/json", bytes.NewBuffer(validData))
+	if err != nil {
+		t.Fatalf("POST /transactions failed: %v", err)
+	}
+	_ = respValid.Body.Close()
+
+	// Wait for propagation to Node B
+	err = waitForCondition(func() bool {
+		return len(nodeB.GetPendingTransactions()) == 1
+	}, 3*time.Second)
+	if err != nil {
+		t.Errorf("Valid faucet transaction failed to propagate to Node B: %v", err)
+	}
+
+	// Clear mempool
+	mineBlockOnNode(nodeA)
+	mineBlockOnNode(nodeB)
+
+	// 11. /faucet creates a properly signed transaction and propagates it
+	faucetPayload, _ := json.Marshal(map[string]interface{}{
+		"receiver": alice.Address,
+		"amount":   50.0,
+	})
+	respFaucet, err := client.Post(fmt.Sprintf("http://127.0.0.1:%d/faucet", nodeA.Port), "application/json", bytes.NewBuffer(faucetPayload))
+	if err != nil {
+		t.Fatalf("POST /faucet failed: %v", err)
+	}
+	defer respFaucet.Body.Close()
+	if respFaucet.StatusCode != http.StatusCreated {
+		t.Errorf("Expected 201 Created from /faucet, got %d", respFaucet.StatusCode)
+	}
+
+	// Verify propagation of this faucet transaction to Node B
+	err = waitForCondition(func() bool {
+		return len(nodeB.GetPendingTransactions()) == 1
+	}, 3*time.Second)
+	if err != nil {
+		t.Errorf("Transaction created via Node A /faucet failed to propagate to Node B: %v", err)
+	}
+}

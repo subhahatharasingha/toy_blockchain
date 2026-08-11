@@ -21,6 +21,7 @@ func ConcurrentMineBlock(
 	stop := make(chan bool)
 
 	var once sync.Once
+	templateBlock := *b
 
 	for i := 0; i < workers; i++ {
 		go func(workerID int) {
@@ -33,7 +34,7 @@ func ConcurrentMineBlock(
 				default:
 				}
 
-				testBlock := *b
+				testBlock := templateBlock
 				testBlock.Nonce = nonce
 
 				hash := utils.CalculateHash(testBlock)

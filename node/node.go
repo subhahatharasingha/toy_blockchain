@@ -7,12 +7,16 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
 	"toy-blockchain/block"
 	"toy-blockchain/blockchain"
+	"toy-blockchain/mining"
+	"toy-blockchain/storage"
 	"toy-blockchain/transaction"
+	"toy-blockchain/wallet"
 )
 
 // Peer represents a configuration of another node in the network.
@@ -41,6 +45,7 @@ type Node struct {
 	seenTxsMu    sync.RWMutex // Guards seen transaction IDs cache
 	seenBlocks   map[string]struct{}
 	seenBlocksMu sync.RWMutex // Guards seen block hashes cache
+	DbPath       string
 }
 
 // NewNode creates and initializes a new Node.
@@ -90,6 +95,12 @@ func (n *Node) StartServer() error {
 	mux.HandleFunc("/blocks", n.handlePostBlock)
 	mux.HandleFunc("/chain", n.handleGetChain)
 	mux.HandleFunc("/sync", n.handlePostSync)
+	mux.HandleFunc("/status", n.handleStatus)
+	mux.HandleFunc("/mempool", n.handleMempool)
+	mux.HandleFunc("GET /balance/{address}", n.handleBalance)
+	mux.HandleFunc("/balance/", n.handleBalance)
+	mux.HandleFunc("/mine", n.handleMine)
+	mux.HandleFunc("/faucet", n.handleFaucet)
 
 	server := &http.Server{
 		Addr:    fmt.Sprintf("%s:%d", n.Host, n.Port),
@@ -97,6 +108,8 @@ func (n *Node) StartServer() error {
 	}
 	n.httpServer = server
 	n.serverMu.Unlock()
+
+	n.startPeerHandshaker()
 
 	go func() {
 		_ = server.Serve(listener)
@@ -188,6 +201,9 @@ func (n *Node) GetPeers() []Peer {
 func (n *Node) AddMinedBlockAndGossip(b block.Block) {
 	n.blockchainMu.Lock()
 	n.Blockchain.AddMinedBlock(b)
+	if n.DbPath != "" {
+		_ = storage.Save(n.Blockchain, n.DbPath)
+	}
 	n.blockchainMu.Unlock()
 
 	n.seenBlocksMu.Lock()
@@ -238,20 +254,39 @@ func (n *Node) handleNodeInfo(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(resp)
 }
 
-// handlePeers returns current node peers as JSON.
+// handlePeers returns current node peers as JSON or registers a new peer.
 func (n *Node) handlePeers(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+	if r.Method == http.MethodGet {
+		resp := peersResponse{
+			Peers: n.GetPeers(),
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(resp)
 		return
 	}
 
-	resp := peersResponse{
-		Peers: n.GetPeers(),
+	if r.Method == http.MethodPost {
+		var p Peer
+		err := json.NewDecoder(r.Body).Decode(&p)
+		if err != nil || p.Host == "" || p.Port <= 0 {
+			http.Error(w, "Invalid peer data", http.StatusBadRequest)
+			return
+		}
+		if p.ID == "" {
+			p.ID = fmt.Sprintf("peer-%s-%d", p.Host, p.Port)
+		}
+		err = n.AddPeer(p)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		w.WriteHeader(http.StatusCreated)
+		_, _ = w.Write([]byte(`{"status":"success"}`))
+		return
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(resp)
+	http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 }
 
 // handlePostTransaction receives a transaction and processes it for gossip.
@@ -287,6 +322,9 @@ func (n *Node) handlePostTransaction(w http.ResponseWriter, r *http.Request) {
 
 	n.blockchainMu.Lock()
 	err = n.Blockchain.AddTransaction(tx)
+	if err == nil && n.DbPath != "" {
+		_ = storage.Save(n.Blockchain, n.DbPath)
+	}
 	n.blockchainMu.Unlock()
 
 	if err != nil {
@@ -336,6 +374,9 @@ func (n *Node) handlePostBlock(w http.ResponseWriter, r *http.Request) {
 	err = n.Blockchain.VerifyBlock(b)
 	if err == nil {
 		n.Blockchain.AddMinedBlock(b)
+		if n.DbPath != "" {
+			_ = storage.Save(n.Blockchain, n.DbPath)
+		}
 	}
 	n.blockchainMu.Unlock()
 
@@ -517,6 +558,9 @@ func (n *Node) SyncWithPeer(p Peer) error {
 		n.blockchainMu.Unlock()
 		return fmt.Errorf("failed to reorganize local blockchain with peer %s chain: %w", p.ID, err)
 	}
+	if n.DbPath != "" {
+		_ = storage.Save(n.Blockchain, n.DbPath)
+	}
 
 	// Read blocks and pending transactions while holding blockchainMu to update caches
 	blocksCopy := make([]block.Block, len(n.Blockchain.Blocks))
@@ -602,4 +646,253 @@ func (n *Node) AddMinedBlock(b block.Block) {
 	n.blockchainMu.Lock()
 	defer n.blockchainMu.Unlock()
 	n.Blockchain.AddMinedBlock(b)
+}
+
+func (n *Node) handleStatus(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	n.blockchainMu.Lock()
+	height := len(n.Blockchain.Blocks)
+	var headHash string
+	if height > 0 {
+		headHash = n.Blockchain.Blocks[height-1].Hash
+	}
+	pendingTxsCount := len(n.Blockchain.PendingTransactions)
+	n.blockchainMu.Unlock()
+
+	peersCount := len(n.GetPeers())
+
+	resp := map[string]interface{}{
+		"height":               height,
+		"head_hash":            headHash,
+		"peers":                peersCount,
+		"pending_transactions": pendingTxsCount,
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(resp)
+}
+
+func (n *Node) handleMempool(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	txs := n.GetPendingTransactions()
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(txs)
+}
+
+func (n *Node) handleBalance(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	address := r.PathValue("address")
+	if address == "" {
+		address = strings.TrimPrefix(r.URL.Path, "/balance/")
+	}
+	if address == "" {
+		http.Error(w, "Missing address", http.StatusBadRequest)
+		return
+	}
+
+	n.blockchainMu.Lock()
+	balance := n.Blockchain.GetBalance(address)
+	n.blockchainMu.Unlock()
+
+	resp := map[string]interface{}{
+		"address": address,
+		"balance": balance,
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(resp)
+}
+
+func (n *Node) handleMine(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	n.blockchainMu.Lock()
+	if len(n.Blockchain.PendingTransactions) == 0 {
+		n.blockchainMu.Unlock()
+		http.Error(w, "No pending transactions to mine", http.StatusBadRequest)
+		return
+	}
+
+	blockData, err := n.Blockchain.CreatePendingBlock(10)
+	if err != nil {
+		n.blockchainMu.Unlock()
+		http.Error(w, fmt.Sprintf("Failed to create pending block: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	latest := n.Blockchain.GetLatestBlock()
+	n.blockchainMu.Unlock()
+
+	blockData.Timestamp = time.Now().Unix()
+	if blockData.Timestamp <= latest.Timestamp {
+		blockData.Timestamp = latest.Timestamp + 1
+	}
+
+	workers := 4
+	_, elapsed := mining.ConcurrentMineBlock(&blockData, blockData.Difficulty, workers)
+
+	n.blockchainMu.Lock()
+	defer n.blockchainMu.Unlock()
+
+	currentLatest := n.Blockchain.GetLatestBlock()
+	if currentLatest.Hash != blockData.PreviousHash {
+		http.Error(w, "Mining aborted: chain tip has changed", http.StatusConflict)
+		return
+	}
+
+	n.Blockchain.AddMinedBlock(blockData)
+
+	if n.DbPath != "" {
+		_ = storage.Save(n.Blockchain, n.DbPath)
+	}
+
+	n.seenBlocksMu.Lock()
+	n.seenBlocks[blockData.Hash] = struct{}{}
+	n.seenBlocksMu.Unlock()
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusCreated)
+	_ = json.NewEncoder(w).Encode(map[string]interface{}{
+		"status":  "success",
+		"message": "Block mined successfully",
+		"block":   blockData,
+		"elapsed": elapsed.String(),
+	})
+
+	go n.gossipBlock(blockData)
+}
+
+func (n *Node) startPeerHandshaker() {
+	go func() {
+		client := &http.Client{Timeout: 2 * time.Second}
+		for {
+			time.Sleep(5 * time.Second)
+
+			peers := n.GetPeers()
+			for _, p := range peers {
+				go func(peer Peer) {
+					// 1. Query peer info
+					url := fmt.Sprintf("http://%s:%d/node", peer.Host, peer.Port)
+					resp, err := client.Get(url)
+					if err != nil {
+						return
+					}
+					defer resp.Body.Close()
+
+					var info nodeInfoResponse
+					if err := json.NewDecoder(resp.Body).Decode(&info); err != nil {
+						return
+					}
+
+					// Update temporary ID to real ID if mismatch
+					if info.ID != "" && info.ID != peer.ID {
+						_ = n.RemovePeer(peer.ID)
+						_ = n.AddPeer(Peer{
+							ID:   info.ID,
+							Host: info.Host,
+							Port: info.Port,
+						})
+					}
+
+					// 2. Announce ourselves to peer
+					n.serverMu.Lock()
+					selfHost := n.Host
+					selfPort := n.Port
+					n.serverMu.Unlock()
+
+					selfInfo := Peer{
+						ID:   n.ID,
+						Host: selfHost,
+						Port: selfPort,
+					}
+					selfData, err := json.Marshal(selfInfo)
+					if err == nil {
+						postUrl := fmt.Sprintf("http://%s:%d/peers", peer.Host, peer.Port)
+						postResp, err := client.Post(postUrl, "application/json", bytes.NewBuffer(selfData))
+						if err == nil {
+							_ = postResp.Body.Close()
+						}
+					}
+				}(p)
+			}
+		}
+	}()
+}
+
+type faucetRequest struct {
+	Receiver string  `json:"receiver"`
+	Amount   float64 `json:"amount"`
+}
+
+func (n *Node) handleFaucet(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req faucetRequest
+	err := json.NewDecoder(r.Body).Decode(&req)
+	if err != nil || req.Receiver == "" || req.Amount <= 0 {
+		http.Error(w, "Invalid request payload", http.StatusBadRequest)
+		return
+	}
+
+	const maxFaucetAmount = 1000.0
+	if req.Amount > maxFaucetAmount {
+		http.Error(w, fmt.Sprintf("Faucet limit exceeded. Maximum allowed per request is %f", maxFaucetAmount), http.StatusBadRequest)
+		return
+	}
+
+	n.blockchainMu.Lock()
+	tx, err := transaction.NewSignedSpecialTransaction(
+		"faucet",
+		wallet.FaucetPrivateKey,
+		wallet.FaucetPublicKey,
+		req.Receiver,
+		req.Amount,
+	)
+	if err != nil {
+		n.blockchainMu.Unlock()
+		http.Error(w, fmt.Sprintf("Failed to sign transaction: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	err = n.Blockchain.AddTransaction(tx)
+	if err == nil && n.DbPath != "" {
+		_ = storage.Save(n.Blockchain, n.DbPath)
+	}
+	n.blockchainMu.Unlock()
+
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Transaction verification failed: %v", err), http.StatusBadRequest)
+		return
+	}
+
+	n.seenTxsMu.Lock()
+	n.seenTxs[tx.ID] = struct{}{}
+	n.seenTxsMu.Unlock()
+
+	go n.gossipTransaction(tx)
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusCreated)
+	_ = json.NewEncoder(w).Encode(map[string]interface{}{
+		"status":      "success",
+		"transaction": tx,
+	})
 }

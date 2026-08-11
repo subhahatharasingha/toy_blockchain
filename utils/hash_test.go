@@ -25,8 +25,8 @@ func TestHashDeterminism(t *testing.T) {
 	}
 
 	b2 := block.Block{
-		Index:        3,
-		Timestamp:    1719830400,
+		Index:     3,
+		Timestamp: 1719830400,
 		Transactions: []transaction.Transaction{
 			{Sender: "alice", Receiver: "bob", Amount: 10.5},
 			{Sender: "bob", Receiver: "charlie", Amount: 2.0},

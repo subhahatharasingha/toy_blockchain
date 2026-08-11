@@ -1,7 +1,6 @@
 package blockchain
 
 import (
-	"encoding/base64"
 	"errors"
 	"fmt"
 	"math"
@@ -11,7 +10,6 @@ import (
 	"toy-blockchain/ledger"
 	"toy-blockchain/transaction"
 	"toy-blockchain/utils"
-	"toy-blockchain/wallet"
 )
 
 // GenesisTimestamp is a fixed Unix timestamp to make the Genesis block completely deterministic.
@@ -87,34 +85,9 @@ func (bc *Blockchain) VerifyTransaction(tx transaction.Transaction) error {
 	}
 
 	// Verify digital signature and ID
-	// System and faucet accounts are allowed without signatures
-	if tx.Sender != "system" && tx.Sender != "faucet" {
-		if tx.PublicKey == "" || tx.Signature == "" {
-			return errors.New("invalid transaction signature")
-		}
-
-		// Decode public key
-		pubKeyBytes, err := base64.StdEncoding.DecodeString(tx.PublicKey)
-		if err != nil || len(pubKeyBytes) != 32 {
-			return errors.New("invalid transaction signature")
-		}
-
-		// Decode signature
-		sigBytes, err := base64.StdEncoding.DecodeString(tx.Signature)
-		if err != nil || len(sigBytes) != 64 {
-			return errors.New("invalid transaction signature")
-		}
-
-		// Verify signature bytes against signing payload
-		signingBytes, err := tx.SigningBytes()
-		if err != nil || !wallet.Verify(pubKeyBytes, signingBytes, sigBytes) {
-			return errors.New("invalid transaction signature")
-		}
-
-		// If signature is mathematically valid, then check if ID is correct
-		if tx.ID == "" || !tx.VerifyID() {
-			return errors.New("invalid transaction ID")
-		}
+	// Verify digital signature and ID
+	if !tx.VerifySignature() {
+		return errors.New("invalid transaction signature")
 	}
 
 	if tx.Sender == "system" || tx.Sender == "faucet" {
@@ -256,11 +229,8 @@ func (bc *Blockchain) VerifyBlock(b block.Block) error {
 		return fmt.Errorf("invalid merkle root")
 	}
 
-	// 8. Verify transaction signatures across all block transactions (skip faucet/system)
+	// 8. Verify transaction signatures across all block transactions
 	for _, tx := range b.Transactions {
-		if tx.Sender == "faucet" || tx.Sender == "system" {
-			continue
-		}
 		if tx.ID == "" || !tx.VerifyID() {
 			return fmt.Errorf("invalid transaction ID")
 		}
@@ -270,6 +240,43 @@ func (bc *Blockchain) VerifyBlock(b block.Block) error {
 		if !tx.VerifySignature() {
 			return fmt.Errorf("invalid transaction signature")
 		}
+	}
+
+	// 9. Verify ledger state and balances
+	if err := bc.VerifyLedgerState(b, bc.Blocks); err != nil {
+		return fmt.Errorf("ledger state validation failed: %w", err)
+	}
+
+	return nil
+}
+
+// VerifyLedgerState validates that all transactions in a block are internally consistent
+// and that their senders have sufficient balance at the state of this block.
+func (bc *Blockchain) VerifyLedgerState(b block.Block, parentChain []block.Block) error {
+	l := ledger.NewLedger()
+	for _, parentBlock := range parentChain {
+		for _, tx := range parentBlock.Transactions {
+			l.ApplyTransaction(tx.Sender, tx.Receiver, tx.Amount)
+		}
+	}
+
+	for _, tx := range b.Transactions {
+		if tx.Amount <= 0 || math.IsNaN(tx.Amount) || math.IsInf(tx.Amount, 0) {
+			return fmt.Errorf("transaction %s has invalid amount %f", tx.ID, tx.Amount)
+		}
+		if tx.Sender == tx.Receiver {
+			return fmt.Errorf("transaction %s has same sender and receiver", tx.ID)
+		}
+
+		if tx.Sender != "system" && tx.Sender != "faucet" {
+			currentBalance := l.GetBalance(tx.Sender)
+			if currentBalance < tx.Amount {
+				return fmt.Errorf("insufficient balance for transaction %s: sender %s has %f, trying to send %f",
+					tx.ID, tx.Sender, currentBalance, tx.Amount)
+			}
+		}
+
+		l.ApplyTransaction(tx.Sender, tx.Receiver, tx.Amount)
 	}
 
 	return nil
@@ -364,13 +371,10 @@ func (bc *Blockchain) Validate(difficulty int) (bool, int, error) {
 		}
 	}
 
-	// 6. Verify transaction signatures across all blocks (skip faucet/system)
+	// 6. Verify transaction signatures across all blocks
 	for i := 0; i < len(bc.Blocks); i++ {
 		current := bc.Blocks[i]
 		for _, tx := range current.Transactions {
-			if tx.Sender == "faucet" || tx.Sender == "system" {
-				continue
-			}
 			if tx.PublicKey == "" || tx.Signature == "" {
 				return false, i, fmt.Errorf("missing signature fields for transaction")
 			}

@@ -6,7 +6,77 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"os"
+	"path/filepath"
 )
+
+var (
+	FaucetPrivateKey ed25519.PrivateKey
+	FaucetPublicKey  ed25519.PublicKey
+	SystemPrivateKey ed25519.PrivateKey
+	SystemPublicKey  ed25519.PublicKey
+)
+
+func findKeyPath(filename string) string {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return filename
+	}
+	dir := cwd
+	for {
+		path := filepath.Join(dir, filename)
+		if _, err := os.Stat(path); err == nil {
+			return path
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			break
+		}
+		dir = parent
+	}
+	dir = cwd
+	for {
+		if _, err := os.Stat(filepath.Join(dir, "go.mod")); err == nil {
+			return filepath.Join(dir, filename)
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			break
+		}
+		dir = parent
+	}
+	return filename
+}
+
+func init() {
+	faucetPath := findKeyPath("faucet.key")
+	faucetPrv, err := os.ReadFile(faucetPath)
+	if err == nil && len(faucetPrv) == ed25519.PrivateKeySize {
+		FaucetPrivateKey = ed25519.PrivateKey(faucetPrv)
+		FaucetPublicKey = FaucetPrivateKey.Public().(ed25519.PublicKey)
+	} else {
+		pub, prv, err := ed25519.GenerateKey(rand.Reader)
+		if err == nil {
+			FaucetPrivateKey = prv
+			FaucetPublicKey = pub
+			_ = os.WriteFile(faucetPath, prv, 0600)
+		}
+	}
+
+	systemPath := findKeyPath("system.key")
+	systemPrv, err := os.ReadFile(systemPath)
+	if err == nil && len(systemPrv) == ed25519.PrivateKeySize {
+		SystemPrivateKey = ed25519.PrivateKey(systemPrv)
+		SystemPublicKey = SystemPrivateKey.Public().(ed25519.PublicKey)
+	} else {
+		pub, prv, err := ed25519.GenerateKey(rand.Reader)
+		if err == nil {
+			SystemPrivateKey = prv
+			SystemPublicKey = pub
+			_ = os.WriteFile(systemPath, prv, 0600)
+		}
+	}
+}
 
 // Wallet contains an Ed25519 key pair and its blockchain address.
 type Wallet struct {

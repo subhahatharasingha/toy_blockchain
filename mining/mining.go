@@ -7,7 +7,6 @@ import (
 	"toy-blockchain/utils"
 )
 
-
 func MineBlock(b *block.Block, difficulty int) (int, time.Duration) {
 	start := time.Now()
 	b.Difficulty = difficulty
