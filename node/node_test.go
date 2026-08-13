@@ -1523,3 +1523,194 @@ func TestNetworkFaucetAndBlockSecurity(t *testing.T) {
 		t.Errorf("Transaction created via Node A /faucet failed to propagate to Node B: %v", err)
 	}
 }
+
+func TestNetworkForkConvergenceThreeNodes(t *testing.T) {
+	var err error
+	nodeA := node.NewNode("node-a", "127.0.0.1", 0, nil)
+	nodeB := node.NewNode("node-b", "127.0.0.1", 0, nil)
+	nodeC := node.NewNode("node-c", "127.0.0.1", 0, nil)
+
+	_ = nodeA.StartServer()
+	_ = nodeB.StartServer()
+	_ = nodeC.StartServer()
+	defer func() {
+		_ = nodeA.Shutdown(context.Background())
+		_ = nodeB.Shutdown(context.Background())
+		_ = nodeC.Shutdown(context.Background())
+	}()
+
+	// 1. Construct independent forks:
+	// Node A: Genesis -> A1 -> A2
+	// Node B: Genesis -> B1 -> B2 -> B3 -> B4
+	// Node C: Genesis -> C1
+	mineBlockOnNode(nodeA) // A1
+	mineBlockOnNode(nodeA) // A2
+
+	mineBlockOnNode(nodeB) // B1
+	mineBlockOnNode(nodeB) // B2
+	mineBlockOnNode(nodeB) // B3
+	mineBlockOnNode(nodeB) // B4
+
+	mineBlockOnNode(nodeC) // C1
+
+	blocksA := nodeA.GetBlocks()
+	blocksB := nodeB.GetBlocks()
+	blocksC := nodeC.GetBlocks()
+
+	// 2. Verify all three chains are independently valid
+	if !blockchain.ValidateChain(blocksA) {
+		t.Fatal("Node A chain failed initial validation")
+	}
+	if !blockchain.ValidateChain(blocksB) {
+		t.Fatal("Node B chain failed initial validation")
+	}
+	if !blockchain.ValidateChain(blocksC) {
+		t.Fatal("Node C chain failed initial validation")
+	}
+
+	// 3. Verify they have the same genesis block but different tips
+	if blocksA[0].Hash != blocksB[0].Hash || blocksB[0].Hash != blocksC[0].Hash {
+		t.Fatal("Nodes do not share the same genesis block")
+	}
+	if blocksA[len(blocksA)-1].Hash == blocksB[len(blocksB)-1].Hash {
+		t.Fatal("Node A and Node B tip hashes are identical, expected different forks")
+	}
+	if blocksC[len(blocksC)-1].Hash == blocksB[len(blocksB)-1].Hash {
+		t.Fatal("Node C and Node B tip hashes are identical, expected different forks")
+	}
+
+	// 4. Verify that B's chain is preferred over A's and C's according to existing rules
+	if !blockchain.IsPreferredChain(blocksB, blocksA) {
+		t.Fatal("Expected Node B's chain to be preferred over Node A's")
+	}
+	if !blockchain.IsPreferredChain(blocksB, blocksC) {
+		t.Fatal("Expected Node B's chain to be preferred over Node C's")
+	}
+
+	// 5. Gather expected orphaned transactions to verify later
+	// Node A had blocks A1 and A2 containing dummy transactions.
+	var expectedOrphanedA []string
+	for _, b := range blocksA[1:] {
+		for _, tx := range b.Transactions {
+			expectedOrphanedA = append(expectedOrphanedA, tx.ID)
+		}
+	}
+	// Node C had block C1 containing a dummy transaction.
+	var expectedOrphanedC []string
+	for _, b := range blocksC[1:] {
+		for _, tx := range b.Transactions {
+			expectedOrphanedC = append(expectedOrphanedC, tx.ID)
+		}
+	}
+
+	// 6. Trigger production synchronization
+	peerB := node.Peer{ID: nodeB.ID, Host: nodeB.Host, Port: nodeB.Port}
+	err = nodeA.SyncWithPeer(peerB)
+	if err != nil {
+		t.Fatalf("Node A failed to sync with Node B: %v", err)
+	}
+	err = nodeC.SyncWithPeer(peerB)
+	if err != nil {
+		t.Fatalf("Node C failed to sync with Node B: %v", err)
+	}
+
+	// 7. Verify convergence on Node B's chain
+	finalBlocksA := nodeA.GetBlocks()
+	finalBlocksC := nodeC.GetBlocks()
+
+	if len(finalBlocksA) != len(blocksB) {
+		t.Errorf("Node A length mismatch: expected %d, got %d", len(blocksB), len(finalBlocksA))
+	}
+	if len(finalBlocksC) != len(blocksB) {
+		t.Errorf("Node C length mismatch: expected %d, got %d", len(blocksB), len(finalBlocksC))
+	}
+
+	if finalBlocksA[len(finalBlocksA)-1].Hash != blocksB[len(blocksB)-1].Hash {
+		t.Errorf("Node A head hash did not converge to Node B head hash")
+	}
+	if finalBlocksC[len(finalBlocksC)-1].Hash != blocksB[len(blocksB)-1].Hash {
+		t.Errorf("Node C head hash did not converge to Node B head hash")
+	}
+
+	// Verify post-sync chains are valid
+	if !blockchain.ValidateChain(finalBlocksA) {
+		t.Error("Node A final chain is invalid")
+	}
+	if !blockchain.ValidateChain(finalBlocksC) {
+		t.Error("Node C final chain is invalid")
+	}
+
+	// 8. Verify that orphaned transactions were restored to their mempools
+	pendingA := nodeA.GetPendingTransactions()
+	if len(pendingA) != len(expectedOrphanedA) {
+		t.Errorf("Node A pending transactions count mismatch: expected %d, got %d", len(expectedOrphanedA), len(pendingA))
+	} else {
+		for _, expectedID := range expectedOrphanedA {
+			found := false
+			for _, tx := range pendingA {
+				if tx.ID == expectedID {
+					found = true
+					break
+				}
+			}
+			if !found {
+				t.Errorf("Orphaned transaction %s was not restored to Node A's mempool", expectedID)
+			}
+		}
+	}
+
+	pendingC := nodeC.GetPendingTransactions()
+	if len(pendingC) != len(expectedOrphanedC) {
+		t.Errorf("Node C pending transactions count mismatch: expected %d, got %d", len(expectedOrphanedC), len(pendingC))
+	} else {
+		for _, expectedID := range expectedOrphanedC {
+			found := false
+			for _, tx := range pendingC {
+				if tx.ID == expectedID {
+					found = true
+					break
+				}
+			}
+			if !found {
+				t.Errorf("Orphaned transaction %s was not restored to Node C's mempool", expectedID)
+			}
+		}
+	}
+
+	// 9. Verify invalid chain rejection during synchronization
+	nodeD := node.NewNode("node-d", "127.0.0.1", 0, nil)
+	_ = nodeD.StartServer()
+	defer func() { _ = nodeD.Shutdown(context.Background()) }()
+
+	// Sync Node D with B first to get the same valid chain
+	err = nodeD.SyncWithPeer(peerB)
+	if err != nil {
+		t.Fatalf("Failed to sync Node D with Node B initially: %v", err)
+	}
+
+	// Mine one block on Node D
+	mineBlockOnNode(nodeD)
+
+	// Tamper with the mined block on Node D (make transaction amount invalid)
+	blocksD := nodeD.GetBlocks()
+	lastBlock := blocksD[len(blocksD)-1]
+	lastBlock.Transactions[0].Amount = 9999.0
+	lastBlock.MerkleRoot = utils.CalculateMerkleRoot(lastBlock.Transactions)
+	lastBlock.Hash = utils.CalculateHash(lastBlock)
+	nodeD.Blockchain.Blocks[len(blocksD)-1] = lastBlock
+
+	// Try to sync Node A with Node D's invalid chain
+	peerD := node.Peer{ID: nodeD.ID, Host: nodeD.Host, Port: nodeD.Port}
+	err = nodeA.SyncWithPeer(peerD)
+	if err == nil {
+		t.Error("Expected SyncWithPeer to fail when syncing with invalid chain from Node D")
+	}
+
+	// Verify Node A's chain did not reorganize and remains unchanged
+	if len(nodeA.GetBlocks()) != len(blocksB) {
+		t.Errorf("Node A chain length changed after invalid sync attempt: expected %d, got %d", len(blocksB), len(nodeA.GetBlocks()))
+	}
+	if nodeA.GetBlocks()[len(nodeA.GetBlocks())-1].Hash != blocksB[len(blocksB)-1].Hash {
+		t.Errorf("Node A tip hash changed after invalid sync attempt")
+	}
+}
