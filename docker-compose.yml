@@ -1,0 +1,48 @@
+version: '3.8'
+
+services:
+  node-a:
+    build: .
+    container_name: node-a
+    hostname: node-a
+    ports:
+      - "8001:8001"
+    volumes:
+      - ./data/nodeA:/app/data
+      - ./faucet.key:/app/faucet.key:ro
+      - ./system.key:/app/system.key:ro
+    environment:
+      - ANNOUNCE_HOST=node-a
+    command: ["node", "--id", "node-a", "--host", "0.0.0.0", "--port", "8001", "--file", "/app/data/blockchain.json"]
+
+  node-b:
+    build: .
+    container_name: node-b
+    hostname: node-b
+    ports:
+      - "8002:8002"
+    volumes:
+      - ./data/nodeB:/app/data
+      - ./faucet.key:/app/faucet.key:ro
+      - ./system.key:/app/system.key:ro
+    environment:
+      - ANNOUNCE_HOST=node-b
+    command: ["node", "--id", "node-b", "--host", "0.0.0.0", "--port", "8002", "--file", "/app/data/blockchain.json", "--peers", "http://node-a:8001"]
+    depends_on:
+      - node-a
+
+  node-c:
+    build: .
+    container_name: node-c
+    hostname: node-c
+    ports:
+      - "8003:8003"
+    volumes:
+      - ./data/nodeC:/app/data
+      - ./faucet.key:/app/faucet.key:ro
+      - ./system.key:/app/system.key:ro
+    environment:
+      - ANNOUNCE_HOST=node-c
+    command: ["node", "--id", "node-c", "--host", "0.0.0.0", "--port", "8003", "--file", "/app/data/blockchain.json", "--peers", "http://node-a:8001"]
+    depends_on:
+      - node-a

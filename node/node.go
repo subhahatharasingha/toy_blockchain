@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -820,6 +821,10 @@ func (n *Node) startPeerHandshaker() {
 					selfHost := n.Host
 					selfPort := n.Port
 					n.serverMu.Unlock()
+
+					if envHost := os.Getenv("ANNOUNCE_HOST"); envHost != "" {
+						selfHost = envHost
+					}
 
 					selfInfo := Peer{
 						ID:   n.ID,

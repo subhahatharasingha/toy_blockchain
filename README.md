@@ -516,6 +516,50 @@ go test ./...
 
 ---
 
+# Running with Docker Compose
+
+An additional way to run the 3-node network cluster is using Docker Compose.
+
+### Start the Cluster
+To build the image and start the 3-node cluster:
+```bash
+docker compose up --build
+```
+
+This starts:
+* **Node A:** http://localhost:8001 (Seed Node)
+* **Node B:** http://localhost:8002 (Connects to Node A, auto-discovers Node C)
+* **Node C:** http://localhost:8003 (Connects to Node A, auto-discovers Node B)
+
+### Status Example
+From the host machine, you can check the status of a node using:
+```bash
+# On Windows PowerShell
+Invoke-RestMethod http://127.0.0.1:8001/status
+
+# Or using curl
+curl http://localhost:8001/status
+```
+
+### Stop the Cluster
+To stop the cluster:
+```bash
+docker compose down
+```
+
+### Reset Cluster Database State
+To stop the cluster and delete the persistent database volumes:
+```bash
+docker compose down -v
+```
+
+### Network Communication Notes
+* Internally within the Docker network, nodes communicate with each other using their Docker service names (e.g., `http://node-a:8001`).
+* Externally from your host machine, you access the nodes through `localhost` on the mapped ports (`8001`, `8002`, `8003`).
+
+
+---
+
 
 
 
