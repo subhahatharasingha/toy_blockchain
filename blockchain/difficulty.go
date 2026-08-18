@@ -33,7 +33,7 @@ func CalculateNextDifficulty(blocks []block.Block) int {
 	oldestBlock := blocks[len(blocks)-AdjustmentWindow]
 
 	actualTime := latestBlock.Timestamp - oldestBlock.Timestamp
-	expectedTime := int64(AdjustmentWindow * TargetBlockTime)
+	expectedTime := int64((AdjustmentWindow - 1) * TargetBlockTime)
 
 	difficulty := latestBlock.Difficulty
 

@@ -1092,7 +1092,7 @@ func TestConcurrentStressNode(t *testing.T) {
 						blockData, err := n.CreatePendingBlock(10)
 						if err == nil {
 							blocks := n.GetBlocks()
-							blockData.Timestamp = blocks[len(blocks)-1].Timestamp + 1
+							blockData.Timestamp = blocks[len(blocks)-1].Timestamp + 300
 							toy_mining.MineBlock(&blockData, blockData.Difficulty)
 							n.AddMinedBlockAndGossip(blockData)
 						}
