@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -16,6 +17,7 @@ import (
 	"toy-blockchain/mining"
 	"toy-blockchain/storage"
 	"toy-blockchain/transaction"
+	"toy-blockchain/utils"
 	"toy-blockchain/wallet"
 )
 
@@ -101,6 +103,10 @@ func (n *Node) StartServer() error {
 	mux.HandleFunc("/balance/", n.handleBalance)
 	mux.HandleFunc("/mine", n.handleMine)
 	mux.HandleFunc("/faucet", n.handleFaucet)
+	mux.HandleFunc("GET /blocks/{index}/merkle-proof/{txId}", n.handleGetMerkleProof)
+	mux.HandleFunc("/blocks/{index}/merkle-proof/{txId}", n.handleGetMerkleProof)
+	mux.HandleFunc("POST /merkle-proof/verify", n.handleVerifyMerkleProof)
+	mux.HandleFunc("/merkle-proof/verify", n.handleVerifyMerkleProof)
 
 	server := &http.Server{
 		Addr:    fmt.Sprintf("%s:%d", n.Host, n.Port),
@@ -927,4 +933,117 @@ func (n *Node) handleFaucet(w http.ResponseWriter, r *http.Request) {
 		"status":      "success",
 		"transaction": tx,
 	})
+}
+
+type merkleProofResponse struct {
+	BlockIndex       int                     `json:"block_index"`
+	TransactionID    string                  `json:"transaction_id"`
+	TransactionIndex int                     `json:"transaction_index"`
+	MerkleRoot       string                  `json:"merkle_root"`
+	Proof            []utils.MerkleProofStep `json:"proof"`
+}
+
+func (n *Node) handleGetMerkleProof(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	indexStr := r.PathValue("index")
+	txID := r.PathValue("txId")
+
+	// Fallback parsing if PathValues are empty
+	if indexStr == "" || txID == "" {
+		parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
+		if len(parts) >= 4 && parts[0] == "blocks" && parts[2] == "merkle-proof" {
+			indexStr = parts[1]
+			txID = parts[3]
+		} else {
+			http.Error(w, "Missing block index or transaction ID parameters", http.StatusBadRequest)
+			return
+		}
+	}
+
+	index, err := strconv.Atoi(indexStr)
+	if err != nil {
+		http.Error(w, "Invalid block index", http.StatusBadRequest)
+		return
+	}
+
+	n.blockchainMu.Lock()
+	defer n.blockchainMu.Unlock()
+
+	if index < 0 || index >= len(n.Blockchain.Blocks) {
+		http.Error(w, "Block not found", http.StatusNotFound)
+		return
+	}
+
+	b := n.Blockchain.Blocks[index]
+
+	// Find the transaction by ID in the block
+	txIndex := -1
+	for i, tx := range b.Transactions {
+		if tx.ID == txID {
+			txIndex = i
+			break
+		}
+	}
+
+	if txIndex == -1 {
+		http.Error(w, "Transaction not found in the specified block", http.StatusNotFound)
+		return
+	}
+
+	proof, err := utils.GenerateMerkleProof(b.Transactions, txIndex)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Failed to generate Merkle proof: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	resp := merkleProofResponse{
+		BlockIndex:       b.Index,
+		TransactionID:    txID,
+		TransactionIndex: txIndex,
+		MerkleRoot:       b.MerkleRoot,
+		Proof:            proof,
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(resp)
+}
+
+type verifyMerkleProofRequest struct {
+	Transaction      transaction.Transaction `json:"transaction"`
+	TransactionIndex int                     `json:"transaction_index"`
+	Proof            []utils.MerkleProofStep `json:"proof"`
+	MerkleRoot       string                  `json:"merkle_root"`
+}
+
+type verifyMerkleProofResponse struct {
+	Valid bool `json:"valid"`
+}
+
+func (n *Node) handleVerifyMerkleProof(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req verifyMerkleProofRequest
+	err := json.NewDecoder(r.Body).Decode(&req)
+	if err != nil {
+		http.Error(w, "Invalid request body payload", http.StatusBadRequest)
+		return
+	}
+
+	valid := utils.VerifyMerkleProof(req.Transaction, req.Proof, req.TransactionIndex, req.MerkleRoot)
+
+	resp := verifyMerkleProofResponse{
+		Valid: valid,
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(resp)
 }

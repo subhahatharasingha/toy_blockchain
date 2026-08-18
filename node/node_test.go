@@ -1790,3 +1790,117 @@ func TestPeerDiscovery(t *testing.T) {
 		seenIDs[p.ID] = true
 	}
 }
+
+func TestMerkleProofAPI(t *testing.T) {
+	nodeA := node.NewNode("node-a", "127.0.0.1", 0, nil)
+	if err := nodeA.StartServer(); err != nil {
+		t.Fatalf("Failed to start server: %v", err)
+	}
+	defer func() { _ = nodeA.Shutdown(context.Background()) }()
+
+	// Create and mine a block with transactions
+	alice, _ := wallet.NewWallet()
+	tx1 := faucetTx(alice.Address, 100.0)
+	_ = nodeA.AddTransaction(tx1)
+	mineBlockOnNode(nodeA)
+
+	blocks := nodeA.GetBlocks()
+	if len(blocks) != 2 {
+		t.Fatalf("Expected 2 blocks (genesis + block 1), got %d", len(blocks))
+	}
+	b1 := blocks[1]
+	txMined := b1.Transactions[0]
+
+	client := &http.Client{Timeout: 3 * time.Second}
+
+	// 1. GET /blocks/1/merkle-proof/{txId}
+	urlGet := fmt.Sprintf("http://127.0.0.1:%d/blocks/1/merkle-proof/%s", nodeA.Port, txMined.ID)
+	respGet, err := client.Get(urlGet)
+	if err != nil {
+		t.Fatalf("GET request failed: %v", err)
+	}
+	defer respGet.Body.Close()
+
+	if respGet.StatusCode != http.StatusOK {
+		bodyBytes, _ := io.ReadAll(respGet.Body)
+		t.Fatalf("Expected GET status 200, got %d, body: %s", respGet.StatusCode, string(bodyBytes))
+	}
+
+	var proofResp struct {
+		BlockIndex       int                     `json:"block_index"`
+		TransactionID    string                  `json:"transaction_id"`
+		TransactionIndex int                     `json:"transaction_index"`
+		MerkleRoot       string                  `json:"merkle_root"`
+		Proof            []utils.MerkleProofStep `json:"proof"`
+	}
+	if err := json.NewDecoder(respGet.Body).Decode(&proofResp); err != nil {
+		t.Fatalf("Failed to decode response: %v", err)
+	}
+
+	if proofResp.BlockIndex != 1 || proofResp.TransactionID != txMined.ID || proofResp.TransactionIndex != 0 || proofResp.MerkleRoot != b1.MerkleRoot {
+		t.Errorf("Response fields mismatch: %+v", proofResp)
+	}
+
+	// Verify using local VerifyMerkleProof function
+	if !utils.VerifyMerkleProof(txMined, proofResp.Proof, proofResp.TransactionIndex, proofResp.MerkleRoot) {
+		t.Error("Retrieved proof failed local verification")
+	}
+
+	// 2. POST /merkle-proof/verify (Valid Request)
+	verifyReqPayload := map[string]interface{}{
+		"transaction":       txMined,
+		"transaction_index": proofResp.TransactionIndex,
+		"proof":             proofResp.Proof,
+		"merkle_root":       proofResp.MerkleRoot,
+	}
+	data, _ := json.Marshal(verifyReqPayload)
+
+	urlPost := fmt.Sprintf("http://127.0.0.1:%d/merkle-proof/verify", nodeA.Port)
+	respPost, err := client.Post(urlPost, "application/json", bytes.NewBuffer(data))
+	if err != nil {
+		t.Fatalf("POST request failed: %v", err)
+	}
+	defer respPost.Body.Close()
+
+	if respPost.StatusCode != http.StatusOK {
+		t.Fatalf("Expected POST status 200, got %d", respPost.StatusCode)
+	}
+
+	var verifyResp struct {
+		Valid bool `json:"valid"`
+	}
+	if err := json.NewDecoder(respPost.Body).Decode(&verifyResp); err != nil {
+		t.Fatalf("Failed to decode POST response: %v", err)
+	}
+
+	if !verifyResp.Valid {
+		t.Error("POST verify endpoint returned false for a valid proof")
+	}
+
+	// 3. POST /merkle-proof/verify (Tampered Request - modified transaction amount)
+	txMinedTampered := txMined
+	txMinedTampered.Amount = 999.0
+
+	verifyReqPayloadTampered := map[string]interface{}{
+		"transaction":       txMinedTampered,
+		"transaction_index": proofResp.TransactionIndex,
+		"proof":             proofResp.Proof,
+		"merkle_root":       proofResp.MerkleRoot,
+	}
+	dataTampered, _ := json.Marshal(verifyReqPayloadTampered)
+
+	respPostTampered, err := client.Post(urlPost, "application/json", bytes.NewBuffer(dataTampered))
+	if err != nil {
+		t.Fatalf("POST request failed: %v", err)
+	}
+	defer respPostTampered.Body.Close()
+
+	var verifyRespTampered struct {
+		Valid bool `json:"valid"`
+	}
+	_ = json.NewDecoder(respPostTampered.Body).Decode(&verifyRespTampered)
+
+	if verifyRespTampered.Valid {
+		t.Error("POST verify endpoint returned true for a tampered transaction")
+	}
+}
