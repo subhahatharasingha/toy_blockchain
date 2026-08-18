@@ -1714,3 +1714,79 @@ func TestNetworkForkConvergenceThreeNodes(t *testing.T) {
 		t.Errorf("Node A tip hash changed after invalid sync attempt")
 	}
 }
+
+func TestPeerDiscovery(t *testing.T) {
+	// Start three nodes: A, B, C on dynamic ports
+	nodeA := node.NewNode("node-a", "127.0.0.1", 0, nil)
+	nodeB := node.NewNode("node-b", "127.0.0.1", 0, nil)
+	nodeC := node.NewNode("node-c", "127.0.0.1", 0, nil)
+
+	if err := nodeA.StartServer(); err != nil {
+		t.Fatalf("Failed to start Node A: %v", err)
+	}
+	if err := nodeB.StartServer(); err != nil {
+		t.Fatalf("Failed to start Node B: %v", err)
+	}
+	if err := nodeC.StartServer(); err != nil {
+		t.Fatalf("Failed to start Node C: %v", err)
+	}
+
+	defer func() {
+		_ = nodeA.Shutdown(context.Background())
+		_ = nodeB.Shutdown(context.Background())
+		_ = nodeC.Shutdown(context.Background())
+	}()
+
+	// Node A only knows Node B
+	peerB := node.Peer{ID: nodeB.ID, Host: nodeB.Host, Port: nodeB.Port}
+	_ = nodeA.AddPeer(peerB)
+
+	// Node B knows Node A and Node C
+	peerA := node.Peer{ID: nodeA.ID, Host: nodeA.Host, Port: nodeA.Port}
+	peerC := node.Peer{ID: nodeC.ID, Host: nodeC.Host, Port: nodeC.Port}
+	_ = nodeB.AddPeer(peerA)
+	_ = nodeB.AddPeer(peerC)
+
+	// Wait for peer discovery to execute (the handshaker loop runs every 5 seconds)
+	err := waitForCondition(func() bool {
+		peersA := nodeA.GetPeers()
+		peersC := nodeC.GetPeers()
+
+		// Node A should discover Node C
+		hasC := false
+		for _, p := range peersA {
+			if p.ID == nodeC.ID || (p.Host == nodeC.Host && p.Port == nodeC.Port) {
+				hasC = true
+				break
+			}
+		}
+
+		// Node C should discover Node A
+		hasA := false
+		for _, p := range peersC {
+			if p.ID == nodeA.ID || (p.Host == nodeA.Host && p.Port == nodeA.Port) {
+				hasA = true
+				break
+			}
+		}
+
+		return hasC && hasA
+	}, 12*time.Second)
+
+	if err != nil {
+		t.Fatalf("Peer discovery failed to form connections within timeout: %v", err)
+	}
+
+	// Verify that duplicate peers are not created and self-peers are rejected
+	peersA := nodeA.GetPeers()
+	seenIDs := make(map[string]bool)
+	for _, p := range peersA {
+		if p.ID == nodeA.ID || (p.Host == nodeA.Host && p.Port == nodeA.Port) {
+			t.Errorf("Self-peer protection failed: Node A added itself as peer")
+		}
+		if seenIDs[p.ID] {
+			t.Errorf("Duplicate peer detected: Node A has multiple entries for peer %s", p.ID)
+		}
+		seenIDs[p.ID] = true
+	}
+}

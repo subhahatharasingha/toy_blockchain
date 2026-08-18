@@ -828,6 +828,38 @@ func (n *Node) startPeerHandshaker() {
 							_ = postResp.Body.Close()
 						}
 					}
+
+					// 3. Query peer's peer list (Peer Discovery)
+					peersUrl := fmt.Sprintf("http://%s:%d/peers", peer.Host, peer.Port)
+					peersResp, err := client.Get(peersUrl)
+					if err == nil {
+						defer peersResp.Body.Close()
+						var pResp peersResponse
+						if err := json.NewDecoder(peersResp.Body).Decode(&pResp); err == nil {
+							for _, dp := range pResp.Peers {
+								// Self-peer protection
+								if dp.ID == n.ID || (dp.Host == selfHost && dp.Port == selfPort) {
+									continue
+								}
+
+								// Check if already known to avoid duplicates
+								n.peersMu.RLock()
+								_, existsID := n.peers[dp.ID]
+								existsAddr := false
+								for _, existing := range n.peers {
+									if existing.Host == dp.Host && existing.Port == dp.Port {
+										existsAddr = true
+										break
+									}
+								}
+								n.peersMu.RUnlock()
+
+								if !existsID && !existsAddr {
+									_ = n.AddPeer(dp)
+								}
+							}
+						}
+					}
 				}(p)
 			}
 		}
