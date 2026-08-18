@@ -238,3 +238,104 @@ func TestShorterForkIgnored(t *testing.T) {
 		t.Errorf("Expected active chain's tip to remain %s, got %s", b4_main.Hash, bc.Blocks[4].Hash)
 	}
 }
+
+func TestResolveForksSelectsHeaviestAmongMultipleForks(t *testing.T) {
+	bc := blockchain.NewBlockchain()
+	genesis := bc.Blocks[0]
+
+	alice, _ := wallet.NewWallet()
+	bob, _ := wallet.NewWallet()
+	charlie, _ := wallet.NewWallet()
+	david, _ := wallet.NewWallet()
+	eve, _ := wallet.NewWallet()
+	frank, _ := wallet.NewWallet()
+
+	// 1. Build active/main chain of length 3 (Cumulative difficulty: 2)
+	txs1 := []transaction.Transaction{faucetTx(alice.Address, 10.0)}
+	b1_main := mineNextBlockForTest(t, []block.Block{genesis}, txs1)
+
+	txAliceBob, err := transaction.NewSignedTransaction(alice, bob.Address, 5.0)
+	if err != nil {
+		t.Fatalf("Failed to create signed transaction: %v", err)
+	}
+	txs2 := []transaction.Transaction{txAliceBob}
+	b2_main := mineNextBlockForTest(t, []block.Block{genesis, b1_main}, txs2)
+
+	activeChain := []block.Block{genesis, b1_main, b2_main}
+	bc.Blocks = activeChain
+
+	// 2. Build Fork A of length 5 (Cumulative difficulty: 4)
+	txs1_A := []transaction.Transaction{faucetTx(charlie.Address, 20.0)}
+	b1_A := mineNextBlockForTest(t, []block.Block{genesis}, txs1_A)
+
+	txCharlieDavid, err := transaction.NewSignedTransaction(charlie, david.Address, 10.0)
+	if err != nil {
+		t.Fatalf("Failed to create signed transaction: %v", err)
+	}
+	txs2_A := []transaction.Transaction{txCharlieDavid}
+	b2_A := mineNextBlockForTest(t, []block.Block{genesis, b1_A}, txs2_A)
+
+	txDavidEve, err := transaction.NewSignedTransaction(david, eve.Address, 5.0)
+	if err != nil {
+		t.Fatalf("Failed to create signed transaction: %v", err)
+	}
+	txs3_A := []transaction.Transaction{txDavidEve}
+	b3_A := mineNextBlockForTest(t, []block.Block{genesis, b1_A, b2_A}, txs3_A)
+
+	txEveFaucet, err := transaction.NewSignedTransaction(eve, "faucet", 2.0)
+	if err != nil {
+		t.Fatalf("Failed to create signed transaction: %v", err)
+	}
+	txs4_A := []transaction.Transaction{txEveFaucet}
+	b4_A := mineNextBlockForTest(t, []block.Block{genesis, b1_A, b2_A, b3_A}, txs4_A)
+
+	forkA := []block.Block{genesis, b1_A, b2_A, b3_A, b4_A}
+
+	// 3. Build Fork B of length 4 (Cumulative difficulty: 3)
+	txs1_B := []transaction.Transaction{faucetTx(frank.Address, 30.0)}
+	b1_B := mineNextBlockForTest(t, []block.Block{genesis}, txs1_B)
+
+	txFrankFaucet, err := transaction.NewSignedTransaction(frank, "faucet", 15.0)
+	if err != nil {
+		t.Fatalf("Failed to create signed transaction: %v", err)
+	}
+	txs2_B := []transaction.Transaction{txFrankFaucet}
+	b2_B := mineNextBlockForTest(t, []block.Block{genesis, b1_B}, txs2_B)
+
+	txFaucetCharlie, err := transaction.NewSignedTransaction(frank, charlie.Address, 5.0)
+	if err != nil {
+		t.Fatalf("Failed to create signed transaction: %v", err)
+	}
+	txs3_B := []transaction.Transaction{txFaucetCharlie}
+	b3_B := mineNextBlockForTest(t, []block.Block{genesis, b1_B, b2_B}, txs3_B)
+
+	forkB := []block.Block{genesis, b1_B, b2_B, b3_B}
+
+	// 4. Add forks to blockchain
+	// Fork A is index 0, Fork B is index 1
+	bc.AddFork(forkA)
+	bc.AddFork(forkB)
+
+	// Resolve forks
+	replaced := bc.ResolveForks()
+
+	if !replaced {
+		t.Fatal("Expected active chain to be replaced by a preferred fork")
+	}
+
+	// Fork A (length 5, cumulative diff 4) must be chosen over Fork B (length 4, cumulative diff 3)
+	if len(bc.Blocks) != 5 {
+		t.Errorf("Expected active chain length to be 5 (Fork A), got %d", len(bc.Blocks))
+	}
+
+	if bc.Blocks[4].Hash != b4_A.Hash {
+		t.Errorf("Expected active chain's tip to be Fork A's tip %s, got %s", b4_A.Hash, bc.Blocks[4].Hash)
+	}
+
+	// Fork A (index 0) was resolved and should be removed. Fork B (index 1) should remain (now at index 0).
+	if len(bc.Forks) != 1 {
+		t.Errorf("Expected exactly 1 fork to remain in the Forks list, got %d", len(bc.Forks))
+	} else if bc.Forks[0][3].Hash != b3_B.Hash {
+		t.Errorf("Expected remaining fork in Forks list to be Fork B, but got different hash")
+	}
+}

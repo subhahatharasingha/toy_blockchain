@@ -24,18 +24,20 @@ func IsLongerChain(candidate []block.Block, current []block.Block) bool {
 // is preferred over the active chain, it replaces the active chain with that fork.
 // Returns true if a replacement happened, false otherwise.
 func (bc *Blockchain) ResolveForks() bool {
-	longestForkIndex := -1
+	bestForkIndex := -1
+	bestChain := bc.Blocks
 
 	for i, fork := range bc.Forks {
-		if IsPreferredChain(fork, bc.Blocks) {
-			longestForkIndex = i
+		if IsPreferredChain(fork, bestChain) {
+			bestForkIndex = i
+			bestChain = fork
 		}
 	}
 
-	if longestForkIndex != -1 {
-		err := bc.Reorganize(bc.Forks[longestForkIndex])
+	if bestForkIndex != -1 {
+		err := bc.Reorganize(bc.Forks[bestForkIndex])
 		if err == nil {
-			bc.Forks = append(bc.Forks[:longestForkIndex], bc.Forks[longestForkIndex+1:]...)
+			bc.Forks = append(bc.Forks[:bestForkIndex], bc.Forks[bestForkIndex+1:]...)
 			return true
 		}
 	}
